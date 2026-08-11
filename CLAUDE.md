@@ -117,6 +117,59 @@ Branch `claude/waiting-for-details-56uiem`, draft PR #1.
 - `fixtures/CAPTURE.md` — trial-capture checklist. **Probably now moot; the trial has
   likely expired.**
 
+## The code — what to hand the user
+
+**`pine/lorentzian_full.pine` is the deliverable.** ~969 lines. That is the single file
+Stefan pastes into TradingView → Pine Editor → Save → Add to chart. Everything else is
+source for it.
+
+```
+lorentzian_classification.pine   jdehorty's script, MPL-2.0. KEEP BYTE-IDENTICAL.
+pine/addon_smc_brackets.pine     our added layers. Edit this one.
+build_pine.py                    concatenates the two -> pine/lorentzian_full.pine
+```
+
+Run `python build_pine.py` after any edit. Never hand-edit `lorentzian_full.pine` — it
+is generated and will be overwritten. Never edit jdehorty's file either; `build_pine.py`
+applies the two required upstream patches at build time so his source stays clean and
+diffable against future releases.
+
+Stefan works from his phone. He has asked for code **as text in the chat** rather than as
+a file attachment — do that when he asks, and expect to paste the whole thing.
+
+### What the add-on provides
+
+Breaker blocks (pivot lookback 5, 25 tracked, polarity flips on mitigation) · BPR from
+overlapping FVGs · ATR TP/SL brackets anchored to the nearest unmitigated PD array, TP1
+at 1R and TP2 at 2R · Asia/London session tightening · a bracket stats table.
+
+Input names and defaults mirror the paid version's panel so settings transfer directly.
+
+Two deliberate departures from the paid version — **preserve both**:
+1. Upstream's `Use Worst Case Estimates` toggle is left intact (the seller deleted it).
+2. The bracket stats table reports **expectancy in R** and resolves same-bar stop/target
+   ambiguity in favour of the **stop**. Optimistic same-bar resolution is exactly what
+   manufactures a 72%.
+
+### Pine gotchas already hit — don't reintroduce
+
+- **`shorttitle` must be ≤10 chars.** Upstream's is 30. Patched in `build_pine.py`.
+  (`SHORT_TITLE_TOO_LONG`)
+- **`var bool x = na` fails** with CE10173 — Pine infers `const bool`. Use `false`.
+- **`max_boxes_count` defaults to 50.** The add-on draws 3 boxes per signal, so older
+  zones silently vanish. Patched to 500 in `build_pine.py`.
+- **Name collisions with upstream globals.** `r` is his relative-weighting input and
+  `risk`/`x`/`h`/`lag`/`src`/`size` are all taken. Our locals were renamed `r2` and
+  `riskR`. Check any new identifier against the upstream file first.
+- **`ta.*` functions must run on every bar.** Calling `ta.lowest`/`ta.highest` inside a
+  function that only executes on signal bars corrupts their state. They are hoisted to
+  global scope (`lo20`, `hi20`) and passed in.
+- **Declare `var` at global scope**, not inside an `if` block.
+
+**Status: not yet confirmed compiling.** Two errors were fixed; the session ended before
+Stefan reported a clean compile. Ask him for the current error text and iterate. There is
+no Pine compiler in this environment, so paste-and-report is the only loop available.
+
 ## Open / next
 
 - Pine still had unresolved compile errors when the session ended. Two were fixed
