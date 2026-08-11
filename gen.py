@@ -31,6 +31,40 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
     """
     t = text.lower()
 
+    # ---- MACD ----
+    if "macd" in t:
+        params = {"fast": 12, "slow": 26, "signal": 9}
+        expl = "Matched MACD CROSSOVER. Long while MACD line is above its signal line."
+        return "macd", params, expl
+
+    # ---- Stochastic ----
+    if "stochastic" in t or "stoch" in t:
+        n = _first_int(t, 14)
+        params = {"n": n, "oversold": 20, "overbought": 80}
+        expl = f"Matched STOCHASTIC REVERSION (period {n}). Long when %K < 20, exits when %K > 80."
+        return "stoch", params, expl
+
+    # ---- VWAP ----
+    if "vwap" in t:
+        n = _first_int(t, 20)
+        params = {"n": n}
+        expl = f"Matched ROLLING VWAP TREND (period {n}). Long while close holds above VWAP."
+        return "vwap", params, expl
+
+    # ---- Supertrend ----
+    if "supertrend" in t or "super trend" in t:
+        n = _first_int(t, 10)
+        params = {"n": n, "mult": 3.0}
+        expl = f"Matched SUPERTREND FOLLOW (ATR period {n}, mult 3.0). Long while direction is up."
+        return "supertrend", params, expl
+
+    # ---- Rate of change / momentum ROC ----
+    if "rate of change" in t or " roc" in f" {t}":
+        n = _first_int(t, 10)
+        params = {"n": n}
+        expl = f"Matched MOMENTUM ROC (period {n}). Long while rate-of-change is positive."
+        return "roc", params, expl
+
     # ---- RSI / mean reversion ----
     if "rsi" in t or "oversold" in t or "overbought" in t or "mean reversion" in t:
         n = _first_int(t, 14)
