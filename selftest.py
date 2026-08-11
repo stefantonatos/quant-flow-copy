@@ -278,5 +278,60 @@ class TestIndicators(unittest.TestCase):
         self.assertAlmostEqual(ours[-1], prev, places=2)  # converges, never equal
 
 
+# ---------------------------------------------------------------------------
+# Parity with the Pine source
+# ---------------------------------------------------------------------------
+class TestLorentzianParity(unittest.TestCase):
+    """Guards the Python port against drifting from lorentzian_classification.pine."""
+
+    @staticmethod
+    def _pine_label(four_bars_ago, now):
+        """Verbatim translation of .pine:335, with long=1 / short=-1 from .pine:291.
+
+            y_train_series = src[4] < src[0] ? direction.short
+                           : src[4] > src[0] ? direction.long
+                           : direction.neutral
+
+        `src[4]` is 4 bars ago and `src[0]` is now, so a 4-bar RISE labels SHORT.
+        """
+        if four_bars_ago < now:
+            return -1
+        if four_bars_ago > now:
+            return 1
+        return 0
+
+    def test_lorentzian_labels_match_pine(self):
+        """A 4-bar rise must label SHORT (-1), a fall LONG (+1).
+
+        The port once had this inverted, which silently made it trade the mirror
+        image of the indicator. Nothing else in the pipeline compensates: both
+        upstream and the port go long on `prediction_sum > 0`.
+        """
+        from strategies import LorentzianClassification
+
+        closes = [100, 100, 100, 100, 110, 90, 110, 110, 95, 95, 120, 80]
+        bars = mkbars(closes)
+        strat = LorentzianClassification(bars=bars, params={})
+        strat.prepare()
+
+        labels = getattr(strat, "labels", None)
+        if labels is None:
+            self.skipTest("port does not expose `labels`; parity checked in-line below")
+
+        for i in range(4, len(closes)):
+            with self.subTest(i=i, prev=closes[i - 4], now=closes[i]):
+                self.assertEqual(labels[i], self._pine_label(closes[i - 4], closes[i]))
+
+    def test_label_formula_direction_is_not_naive(self):
+        """The formula must be the *inverse* of the trailing move's sign.
+
+        Independent of the port's internals: this pins the semantics so a future
+        edit that makes the sign "read naturally" fails loudly.
+        """
+        self.assertEqual(self._pine_label(100, 110), -1, "a 4-bar RISE labels SHORT")
+        self.assertEqual(self._pine_label(110, 100), 1, "a 4-bar FALL labels LONG")
+        self.assertEqual(self._pine_label(100, 100), 0, "flat labels NEUTRAL")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

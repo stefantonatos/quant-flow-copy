@@ -5,7 +5,7 @@ ends.** Add what was learned, what changed, what broke. Correct anything here th
 out to be wrong — and say plainly that it was wrong, don't quietly delete it. The user
 should never have to re-explain this project from scratch.
 
-Last updated: 2026-08-11 (second session, same day — merged into master).
+Last updated: 2026-08-11 (third session — post-merge, fixed a sign-inverted training label).
 
 ---
 
@@ -31,9 +31,16 @@ network without checking which environment you're actually in.
   `--walkforward`, `--montecarlo`, same as every other strategy. This is a faithful
   best-effort translation of the ML core (KNN search, regime/volatility filters, kernel
   regression trend filter, strict 4-bar exits) — approximate on the exact normalization
-  constants for WT/CCI (documented as such at the class), exact on the training-label
-  definition (`labels[i] = sign(close[i] - close[i-4])`, confirmed against upstream —
-  see the "no lookahead" point above, same conclusion reached independently).
+  constants for WT/CCI (documented as such at the class).
+  **⚠️ The training label in that port was SIGN-INVERTED and has since been fixed.**
+  It shipped as `labels[i] = 1 if closes[i-4] < closes[i] else -1`, described in this
+  file as "exact … confirmed against upstream". It was not. Upstream
+  (`.pine:335`, with `long=1 / short=-1` at `.pine:291`) labels a 4-bar **rise** as
+  **short (−1)**; the port labelled it **+1**. Nothing downstream compensated — both
+  go long on `prediction_sum > 0` — so the port traded the exact **mirror image** of
+  the indicator it replicates. Any backtest run against the pre-fix port is void.
+  Locked by `TestLorentzianParity` in `selftest.py`; the port now exposes `self.labels`
+  so the assertion is direct.
 - `strategies.py`: `BollingerRSI` (`bollrsi`) — long when close < lower band AND RSI
   oversold, exit on RSI overbought or close > upper band. Tested on sample data and on
   `GC=F` (gold futures via Yahoo, the free proxy for gold CFD price — no free source
@@ -127,7 +134,14 @@ brackets, session tightening, breakeven+ offset. Real work, but not $340/yr of e
 3. **"`engine.py:247` raises `UnboundLocalError`."** False — the close branch is guarded
    by `position != 0`, only true after the open branch assigned it. Fragile, not broken.
 
-4. **"kNN costs ~1.4s per 40k bars."** Wrong by ~4x; that benchmark strided the distance
+4. **"The Python port's training label is exact, confirmed against upstream."** False —
+   it was sign-inverted, so the port traded the mirror image of the indicator. Fixed;
+   see the ⚠️ note in the merge section above. **The lesson: the "no lookahead"
+   conclusion was reached correctly and independently by two sessions, and the sign was
+   still wrong.** Agreeing on *when* the label is computed says nothing about *which
+   way* it points. Check both.
+
+5. **"kNN costs ~1.4s per 40k bars."** Wrong by ~4x; that benchmark strided the distance
    loop. Real: **0.137 ms/bar → 5.5s per 40k bars.** Also confirmed the `i % 4 != 0` gate
    is **not** a speedup (0.137 vs 0.136 ms/bar) — it gates neighbour *admission*, not
    distance *computation*, silently discarding a quarter of the training set at fixed

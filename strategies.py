@@ -375,11 +375,26 @@ class LorentzianClassification(Strategy):
         def lorentzian_dist(a, b):
             return sum(math.log1p(abs(x - y)) for x, y in zip(a, b))
 
-        # Training labels: sign of the trailing 4-bar move, exactly as the
-        # indicator computes it live (see lorentzian_classification.pine:335)
+        # Training labels: the trailing 4-bar move, labelled AGAINST its
+        # direction, exactly as the indicator does (lorentzian_classification.pine:335):
+        #
+        #   y_train_series = src[4] < src[0] ? direction.short
+        #                  : src[4] > src[0] ? direction.long
+        #                  : direction.neutral
+        #   with direction.long = 1, direction.short = -1   (.pine:291-296)
+        #
+        # In Pine `src[4]` is 4 bars AGO and `src[0]` is NOW, so `src[4] < src[0]`
+        # means price ROSE -- and upstream labels that SHORT (-1). A 4-bar FALL is
+        # labelled LONG (+1). That looks backwards, and it is deliberate on
+        # upstream's part: the model fades the trailing move rather than
+        # extrapolating it. Do not "fix" the sign to read naturally.
+        #
+        # This previously read `1 if closes[i-4] < closes[i] else -1`, which
+        # inverted every label and made this port trade the exact mirror image of
+        # the indicator it replicates. See test_lorentzian_labels_match_pine.
         labels = [0] * n
         for i in range(4, n):
-            labels[i] = 1 if closes[i - 4] < closes[i] else (-1 if closes[i - 4] > closes[i] else 0)
+            labels[i] = -1 if closes[i - 4] < closes[i] else (1 if closes[i - 4] > closes[i] else 0)
 
         max_bars_back_index = n - 1 - max_bars_back if n - 1 >= max_bars_back else 0
         start_index = max_bars_back_index  # includeFullHistory=False (indicator default)
@@ -408,6 +423,10 @@ class LorentzianClassification(Strategy):
                         distances.pop(0)
                         preds.pop(0)
             predictions_sum[j] = sum(preds)
+
+        # Exposed so the Pine-parity test can assert the label signs directly
+        # rather than inferring them from downstream behaviour.
+        self.labels = labels
 
         # Filters: volatility (short ATR > long ATR) + regime (Kalman-like slope filter)
         atr_short, atr_long = atr(bars, 1), atr(bars, 10)
