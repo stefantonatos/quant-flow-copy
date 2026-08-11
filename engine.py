@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -84,7 +84,10 @@ def rsi(vals: List[float], n: int = 14) -> List[float]:
 
 
 def atr(bars: List[Bar], n: int = 14) -> List[float]:
-    tr = [float("nan")]
+    # tr[0] has no prior close, so use the day's own range (standard
+    # convention) rather than NaN -- sma()'s rolling accumulator would
+    # otherwise be permanently poisoned by a single leading NaN.
+    tr = [bars[0].h - bars[0].l] if bars else []
     for i in range(1, len(bars)):
         hp = bars[i].h - bars[i].l
         hc = abs(bars[i].h - bars[i - 1].c)
@@ -130,6 +133,91 @@ def lowest(vals: List[float], n: int) -> List[float]:
     for i in range(len(vals)):
         if i >= n - 1:
             out[i] = min(vals[i - n + 1 : i + 1])
+    return out
+
+
+def macd(vals: List[float], fast: int = 12, slow: int = 26, signal: int = 9):
+    """Returns (macd_line, signal_line, histogram)."""
+    fast_e = ema(vals, fast)
+    slow_e = ema(vals, slow)
+    line = [a - b if a == a and b == b else float("nan") for a, b in zip(fast_e, slow_e)]
+    clean = [x if x == x else 0.0 for x in line]
+    sig = ema(clean, signal)
+    sig = [s if line[i] == line[i] else float("nan") for i, s in enumerate(sig)]
+    hist = [l - s if l == l and s == s else float("nan") for l, s in zip(line, sig)]
+    return line, sig, hist
+
+
+def stochastic(bars: List[Bar], n: int = 14, d: int = 3):
+    """Returns (%K, %D)."""
+    highs = [b.h for b in bars]
+    lows = [b.l for b in bars]
+    closes = [b.c for b in bars]
+    hh = highest(highs, n)
+    ll = lowest(lows, n)
+    k = [float("nan")] * len(bars)
+    for i in range(len(bars)):
+        if hh[i] == hh[i] and ll[i] == ll[i] and hh[i] != ll[i]:
+            k[i] = 100.0 * (closes[i] - ll[i]) / (hh[i] - ll[i])
+    kd = [x if x == x else 0.0 for x in k]
+    dline = sma(kd, d)
+    dline = [x if k[i] == k[i] else float("nan") for i, x in enumerate(dline)]
+    return k, dline
+
+
+def vwap_rolling(bars: List[Bar], n: int = 20) -> List[float]:
+    """Rolling (non-anchored) VWAP over the last n bars — an approximation
+    since these adapters return daily bars with no intraday session to
+    anchor a true session VWAP to."""
+    tp = [(b.h + b.l + b.c) / 3.0 for b in bars]
+    vol = [b.v for b in bars]
+    out = [float("nan")] * len(bars)
+    for i in range(len(bars)):
+        if i >= n - 1:
+            num = sum(tp[j] * vol[j] for j in range(i - n + 1, i + 1))
+            den = sum(vol[j] for j in range(i - n + 1, i + 1))
+            out[i] = num / den if den > 0 else tp[i]
+    return out
+
+
+def supertrend(bars: List[Bar], n: int = 10, mult: float = 3.0):
+    """Returns (line, direction) where direction[i] is 1 (up/long bias) or
+    -1 (down/short bias)."""
+    a = atr(bars, n)
+    line = [float("nan")] * len(bars)
+    direction = [0] * len(bars)
+    up_band = float("nan")
+    dn_band = float("nan")
+    trend = 1
+    for i in range(len(bars)):
+        if a[i] != a[i]:
+            continue
+        mid = (bars[i].h + bars[i].l) / 2.0
+        basic_up = mid + mult * a[i]
+        basic_dn = mid - mult * a[i]
+        if up_band != up_band:
+            up_band, dn_band = basic_up, basic_dn
+        else:
+            prev_close = bars[i - 1].c
+            up_band = basic_up if (basic_up < up_band or prev_close > up_band) else up_band
+            dn_band = basic_dn if (basic_dn > dn_band or prev_close < dn_band) else dn_band
+        c = bars[i].c
+        if trend == 1 and c < dn_band:
+            trend = -1
+        elif trend == -1 and c > up_band:
+            trend = 1
+        direction[i] = trend
+        line[i] = dn_band if trend == 1 else up_band
+    return line, direction
+
+
+def roc(vals: List[float], n: int = 10) -> List[float]:
+    """Rate of change, percent."""
+    out = [float("nan")] * len(vals)
+    for i in range(n, len(vals)):
+        prev = vals[i - n]
+        if prev:
+            out[i] = (vals[i] - prev) / prev * 100.0
     return out
 
 
@@ -187,7 +275,48 @@ class Report:
     sharpe: float
     bars: int
 
+    def verdict(self) -> Tuple[str, List[str]]:
+        """Heuristic A-F grade from edge/robustness/risk/sample-size, in the
+        spirit of a "verdict score" — not a statistical guarantee."""
+        score = 0
+        notes = []
+        if self.sharpe > 1:
+            score += 2
+        elif self.sharpe > 0:
+            score += 1
+        else:
+            score -= 1
+        if self.profit_factor > 1.5:
+            score += 2
+        elif self.profit_factor > 1:
+            score += 1
+        else:
+            score -= 1
+        if self.max_dd < 0.15:
+            score += 1
+        elif self.max_dd > 0.4:
+            score -= 1
+            notes.append("deep drawdown")
+        n = len(self.trades)
+        if n >= 20:
+            score += 1
+        elif n < 10:
+            score -= 1
+            notes.append(f"low sample size ({n} trades)")
+        if score >= 5:
+            grade = "A"
+        elif score >= 3:
+            grade = "B"
+        elif score >= 1:
+            grade = "C"
+        elif score >= -1:
+            grade = "D"
+        else:
+            grade = "F"
+        return grade, notes
+
     def summary(self) -> str:
+        grade, notes = self.verdict()
         lines = []
         lines.append("=" * 56)
         lines.append("BACKTEST REPORT")
@@ -200,6 +329,7 @@ class Report:
         lines.append(f"Win rate          : {self.win_rate*100:,.1f}%")
         lines.append(f"Profit factor     : {self.profit_factor:,.2f}")
         lines.append(f"Sharpe (ann.)     : {self.sharpe:,.2f}")
+        lines.append(f"Verdict           : {grade}" + (f"  ({', '.join(notes)})" if notes else ""))
         lines.append("=" * 56)
         return "\n".join(lines)
 
@@ -232,7 +362,6 @@ def run(strategy: Strategy, initial: float = 10000.0,
                     cash += proceeds
                     # fee on notional
                     cash -= abs(proceeds) * fee
-                    pnl = (px - entry_px) * position if False else None
                     if entry_side == "LONG":
                         pnl = (px - entry_px) * abs(position)
                     else:
