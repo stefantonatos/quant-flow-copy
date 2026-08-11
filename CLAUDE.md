@@ -5,9 +5,52 @@ ends.** Add what was learned, what changed, what broke. Correct anything here th
 out to be wrong — and say plainly that it was wrong, don't quietly delete it. The user
 should never have to re-explain this project from scratch.
 
-Last updated: 2026-08-11.
+Last updated: 2026-08-11 (second session, same day — merged into master).
 
 ---
+
+## Update from the session that merged this into master
+
+This file was written by a session running in a **sandboxed cloud container** (branch
+`claude/waiting-for-details-56uiem`, no network egress). A **separate, later session**
+ran directly on Stefan's own Windows machine (`C:\Users\Evi\repos\quant-flow-copy`) in
+parallel, diverged from the same commit, and did unrelated Python-side work. Both were
+merged into `master` with no conflicts (only `engine.py` overlapped, and the two sessions'
+changes landed in different regions of it — a clean auto-merge).
+
+**Correction to the claim below:** "No market-data egress from this container" was true
+for that sandboxed session only. It is **not** a repo-wide constraint — Stefan's own
+machine has normal internet access; `data.py`'s Yahoo/Stooq/Binance fetchers have been
+run successfully from there (e.g. `GC=F` gold futures, 252 daily bars). Don't assume no
+network without checking which environment you're actually in.
+
+**What the parallel session added (now in `master`, independent of the Pine work above):**
+- `strategies.py`: a **Python port** of jdehorty's KNN/Lorentzian-distance classifier
+  itself (not just the reference `.pine` file) — `LorentzianClassification`, registry key
+  `lorentzian`. Runs through the normal `engine.run()` backtest loop, `compare` screener,
+  `--walkforward`, `--montecarlo`, same as every other strategy. This is a faithful
+  best-effort translation of the ML core (KNN search, regime/volatility filters, kernel
+  regression trend filter, strict 4-bar exits) — approximate on the exact normalization
+  constants for WT/CCI (documented as such at the class), exact on the training-label
+  definition (`labels[i] = sign(close[i] - close[i-4])`, confirmed against upstream —
+  see the "no lookahead" point above, same conclusion reached independently).
+- `strategies.py`: `BollingerRSI` (`bollrsi`) — long when close < lower band AND RSI
+  oversold, exit on RSI overbought or close > upper band. Tested on sample data and on
+  `GC=F` (gold futures via Yahoo, the free proxy for gold CFD price — no free source
+  quotes actual CFD prices). Very few trades on trending gold by design (two rare
+  conditions stacked); not yet a validated edge.
+- `opt.py` + `run.py optimize <key>`: grid-search optimizer. Small hand-picked param grid
+  per strategy, scores on a 70/30 train slice, re-checks top candidates on the held-out
+  test slice. Reuses `engine.run()`/`Report` as-is, no new backtest path.
+- Found and fixed a second instance of the `ema()` NaN-seed-poisoning bug class (same
+  class as the pre-existing `atr()` fix from commit 843e444) inside a new `wavetrend()`
+  indicator it added for the KNN port's WaveTrend feature.
+- `test_engine.py` grew from 8 to 11 tests (regression tests for the above); all pass
+  alongside `selftest.py`'s 19 (unrelated, no overlap in what they cover).
+
+**Still true and unchanged by this merge:** everything below about the Pine deliverable,
+the paid-version findings, the compile status, and the open/next items. This section is
+additive, not a correction to the Pine-side work.
 
 ## THREE different scripts exist. Do not confuse them.
 
