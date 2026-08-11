@@ -309,6 +309,48 @@ class MomentumROC(Strategy):
                 f"plot(r, color=color.purple)\n")
 
 
+class BollingerRSI(Strategy):
+    name = "Bollinger Bands + RSI"
+    description = "Long when close is below the lower band while RSI is oversold; exit when RSI turns overbought or close breaks back above the upper band."
+
+    def prepare(self):
+        p = self.params
+        self.lo, self.mid, self.hi = bollinger(self.closes, p.get("n", 20), p.get("k", 2.0))
+        self.r = rsi(self.closes, p.get("rsi_n", 14))
+        self.ov = p.get("oversold", 30)
+        self.ob = p.get("overbought", 70)
+        self.holding = False
+
+    def decide(self, i):
+        lo, hi, r = self.lo[i], self.hi[i], self.r[i]
+        if lo != lo or r != r:  # warmup
+            return "LONG" if self.holding else "FLAT"
+        c = self.closes[i]
+        if c < lo and r < self.ov:
+            self.holding = True
+        elif r > self.ob or c > hi:
+            self.holding = False
+        return "LONG" if self.holding else "FLAT"
+
+    def to_pine(self):
+        p = self.params
+        n, k = p.get("n", 20), p.get("k", 2.0)
+        rn, ov, ob = p.get("rsi_n", 14), p.get("oversold", 30), p.get("overbought", 70)
+        return (f"//@version=6\n"
+                f"indicator(\"Bollinger + RSI (free)\")\n"
+                f"basis = ta.sma(close, {n})\n"
+                f"dev = ta.stdev(close, {n}) * {k}\n"
+                f"upper = basis + dev\n"
+                f"lower = basis - dev\n"
+                f"r = ta.rsi(close, {rn})\n"
+                f"longCond = close < lower and r < {ov}\n"
+                f"exitCond = r > {ob} or close > upper\n"
+                f"plot(upper, color=color.gray)\n"
+                f"plot(lower, color=color.gray)\n"
+                f"plotshape(longCond, style=shape.triangleup, color=color.green)\n"
+                f"plotshape(exitCond, style=shape.circledot, color=color.red)\n")
+
+
 class LorentzianClassification(Strategy):
     name = "Lorentzian Classification"
     description = ("ML: KNN over Lorentzian distance across RSI/WaveTrend/CCI/ADX features, "
@@ -483,6 +525,7 @@ REGISTRY = {
     "vwap": VWAPReversion,
     "supertrend": SupertrendFollow,
     "roc": MomentumROC,
+    "bollrsi": BollingerRSI,
     "lorentzian": LorentzianClassification,
 }
 

@@ -18,10 +18,14 @@ Flags:
   --plot              print an ASCII equity curve
   --walkforward K     split into K contiguous out-of-sample folds
   --montecarlo N      bootstrap-resample realized trades N times
+  --metric M          optimize: rank by sharpe|total_return|profit_factor (default sharpe)
+  --top N             optimize: how many top candidates to show (default 5)
 
 Modes:
   list      show all built-in strategies
   compare   screener: run every strategy on the same data, rank by Sharpe
+  optimize  grid-search a strategy's params, validated on a held-out slice
+            e.g. python run.py optimize bollrsi --data sample --metric sharpe
 """
 from __future__ import annotations
 
@@ -35,6 +39,7 @@ sys.path.insert(0, HERE)
 from engine import run
 from gen import generate, plan_from_text
 from strategies import REGISTRY, list_strategies
+from opt import optimize, format_results, PARAM_GRIDS
 import data as D
 
 
@@ -132,6 +137,7 @@ def main(argv):
         return
 
     compare = args[0] == "compare"
+    optimize_mode = args[0] == "optimize"
 
     # parse flags
     text_parts = []
@@ -142,7 +148,9 @@ def main(argv):
     plot = False
     walkforward = 0
     montecarlo = 0
-    i = 1 if compare else 0
+    metric = "sharpe"
+    top_n = 5
+    i = 1 if (compare or optimize_mode) else 0
     while i < len(args):
         a = args[i]
         if a == "--data" or a == "--source":
@@ -159,11 +167,22 @@ def main(argv):
             walkforward = int(args[i + 1]); i += 2; continue
         if a == "--montecarlo":
             montecarlo = int(args[i + 1]); i += 2; continue
+        if a == "--metric":
+            metric = args[i + 1]; i += 2; continue
+        if a == "--top":
+            top_n = int(args[i + 1]); i += 2; continue
         text_parts.append(a); i += 1
 
     text = " ".join(text_parts)
 
-    if not compare:
+    if optimize_mode:
+        strat_key = text_parts[0] if text_parts else None
+        if strat_key not in PARAM_GRIDS:
+            print(f"Usage: python run.py optimize <key> [--data ...] [--metric sharpe|total_return|profit_factor] [--top N]")
+            print(f"Strategies with a param grid: {', '.join(PARAM_GRIDS)}")
+            return
+
+    if not compare and not optimize_mode:
         print(generate(text))
         print()
         key, params, _ = plan_from_text(text)
@@ -191,6 +210,11 @@ def main(argv):
 
     if compare:
         _run_compare(bars, capital, fee)
+        return
+
+    if optimize_mode:
+        results = optimize(strat_key, bars, capital, fee, metric=metric, top_n=top_n)
+        print(format_results(strat_key, results, metric))
         return
 
     strat = strat_cls(bars=bars, params=params)

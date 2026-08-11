@@ -8,6 +8,7 @@ from __future__ import annotations
 import data as D
 from engine import atr, macd, stochastic, vwap_rolling, supertrend, roc, wavetrend, run, Report
 from strategies import REGISTRY
+from opt import optimize, PARAM_GRIDS
 
 
 def test_atr_no_longer_all_nan():
@@ -73,6 +74,15 @@ def test_all_registered_strategies_run_without_error():
         rep = run(strat, initial=10000.0, fee_bps=0.0)
         assert isinstance(rep, Report)
         assert len(rep.equity) == len(bars)
+
+
+def test_optimize_ranks_by_train_metric_and_covers_every_grid():
+    bars = D.load_csv(D.sample_csv())
+    for key in PARAM_GRIDS:
+        results = optimize(key, bars, top_n=3)
+        assert results, f"optimize('{key}') returned no candidates"
+        train_scores = [getattr(train_rep, "sharpe") for _, train_rep, _ in results]
+        assert train_scores == sorted(train_scores, reverse=True), f"'{key}' results not sorted by train sharpe"
 
 
 def test_verdict_returns_known_grade():

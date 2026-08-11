@@ -31,6 +31,25 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
     """
     t = text.lower()
 
+    # ---- Bollinger Bands + RSI combo ----
+    if ("bollinger" in t or "band" in t) and ("rsi" in t or "oversold" in t or "overbought" in t):
+        n = _first_int(t, 20)
+        rn = 14
+        m = re.search(r"rsi.*?(\d+)", t)
+        if m:
+            rn = int(m.group(1))
+        ov, ob = 30, 70
+        m = re.search(r"oversold.*?(\d+)", t)
+        if m:
+            ov = int(m.group(1))
+        m = re.search(r"overbought.*?(\d+)", t)
+        if m:
+            ob = int(m.group(1))
+        params = {"n": n, "rsi_n": rn, "oversold": ov, "overbought": ob}
+        expl = (f"Matched BOLLINGER + RSI (band {n}, RSI {rn}). "
+                f"Long when close < lower band and RSI < {ov}; exit when RSI > {ob} or close > upper band.")
+        return "bollrsi", params, expl
+
     # ---- Lorentzian Classification (ML / KNN) ----
     if "lorentzian" in t or "knn" in t or "k-nearest" in t or "machine learning" in t:
         params = {"neighbors": 8, "max_bars_back": 2000}

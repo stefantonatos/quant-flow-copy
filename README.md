@@ -91,6 +91,12 @@ VALIDATION TOOLS
                   times to show the P5/P50/P95 range of outcomes --
                   how much of the result could be sequence luck.
 
+  optimize        grid-searches a strategy's params (opt.py), scores each
+                  on a train slice, then re-checks the top candidates on
+                  a held-out test slice so a winning combo isn't just
+                  curve-fit to the whole series.
+                  e.g. python run.py optimize bollrsi --data sample
+
 ────────────────────────────────────────────────────────────────────
 PROJECT LAYOUT
 ────────────────────────────────────────────────────────────────────
