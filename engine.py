@@ -30,6 +30,27 @@ class Bar:
         return (self.h + self.l) / 2.0
 
 
+SECONDS_PER_YEAR = 365.25 * 24 * 3600
+
+
+def bars_per_year(bars: List["Bar"], default: float = 252.0) -> float:
+    """Infer how many bars make up a year, from the actual elapsed wall time.
+
+    Counting elapsed time rather than median bar spacing means weekends,
+    holidays and session gaps are handled for free: a year of daily equity
+    bars yields ~252, a year of 1-minute futures bars yields ~350k.
+
+    Annualizing 1-minute results with the old hardcoded 252 overstated
+    Sharpe by roughly sqrt(1380) ~ 37x.
+    """
+    if len(bars) < 3:
+        return default
+    span = bars[-1].t - bars[0].t
+    if not (span > 0) or span != span:      # non-positive or NaN
+        return default
+    return len(bars) / (span / SECONDS_PER_YEAR)
+
+
 # ----------------------------------------------------------------------------
 # Indicator helpers (pure python, NaN-aware)
 # ----------------------------------------------------------------------------
@@ -313,13 +334,20 @@ def normalize01(vals: List[float]) -> List[float]:
 # ----------------------------------------------------------------------------
 @dataclass
 class Trade:
-    side: str          # "LONG" or "SHORT"
+    side: str          # "LONG", "SHORT", or "LIQUIDATED"
     entry_i: int
     entry_px: float
     exit_i: int
     exit_px: float
-    pnl: float
+    pnl: float         # NET of fees - this is what win_rate/profit_factor use
     pnl_pct: float
+    pnl_gross: float = 0.0   # before fees
+    fees: float = 0.0        # entry fee + exit fee
+
+    @property
+    def pnl_net(self) -> float:
+        """Alias for `pnl`, for callers that want the distinction spelled out."""
+        return self.pnl
 
 
 class Strategy:
@@ -361,6 +389,43 @@ class Report:
     profit_factor: float
     sharpe: float
     bars: int
+
+    @property
+    def fees_total(self) -> float:
+        return sum(t.fees for t in self.trades)
+
+    @property
+    def avg_win(self) -> float:
+        w = [t.pnl for t in self.trades if t.pnl > 0]
+        return sum(w) / len(w) if w else 0.0
+
+    @property
+    def avg_loss(self) -> float:
+        """Mean loss as a positive number."""
+        l = [-t.pnl for t in self.trades if t.pnl <= 0]
+        return sum(l) / len(l) if l else 0.0
+
+    @property
+    def payoff_ratio(self) -> float:
+        return (self.avg_win / self.avg_loss) if self.avg_loss > 0 else float("inf")
+
+    @property
+    def breakeven_win_rate(self) -> float:
+        """Win rate this strategy needs, at its realized payoff ratio, to break even.
+
+        The gap between this and the actual win rate is the edge. A 72% win
+        rate means nothing until you know whether breakeven sits at 50% or 71%.
+        """
+        r = self.payoff_ratio
+        if r == float("inf"):
+            return 0.0
+        return 1.0 / (1.0 + r)
+
+    @property
+    def expectancy(self) -> float:
+        """Mean net P&L per trade, in currency."""
+        return (sum(t.pnl for t in self.trades) / len(self.trades)
+                if self.trades else 0.0)
 
     def verdict(self) -> Tuple[str, List[str]]:
         """Heuristic A-F grade from edge/robustness/risk/sample-size, in the
@@ -404,6 +469,8 @@ class Report:
 
     def summary(self) -> str:
         grade, notes = self.verdict()
+        gross = sum(t.pnl_gross for t in self.trades)
+        cost_share = (self.fees_total / gross * 100) if gross > 0 else float("nan")
         lines = []
         lines.append("=" * 56)
         lines.append("BACKTEST REPORT")
@@ -412,83 +479,128 @@ class Report:
         lines.append(f"Final equity      : {self.final:,.2f}")
         lines.append(f"Total return      : {self.total_return*100:,.2f}%")
         lines.append(f"Max drawdown      : {self.max_dd*100:,.2f}%")
-        lines.append(f"Trades            : {len(self.trades)}")
-        lines.append(f"Win rate          : {self.win_rate*100:,.1f}%")
-        lines.append(f"Profit factor     : {self.profit_factor:,.2f}")
         lines.append(f"Sharpe (ann.)     : {self.sharpe:,.2f}")
-        lines.append(f"Verdict           : {grade}" + (f"  ({', '.join(notes)})" if notes else ""))
+        lines.append(f"Verdict           : {grade}"
+                     + (f"  ({', '.join(notes)})" if notes else ""))
+        lines.append("-" * 56)
+        lines.append(f"Trades            : {len(self.trades)}")
+        lines.append(f"Expectancy/trade  : {self.expectancy:,.2f}   <-- read this first")
+        lines.append(f"Win rate          : {self.win_rate*100:,.1f}%"
+                     f"   (breakeven: {self.breakeven_win_rate*100:,.1f}%)")
+        lines.append(f"Payoff ratio      : {self.payoff_ratio:,.2f}"
+                     f"   (avg win {self.avg_win:,.2f} / avg loss {self.avg_loss:,.2f})")
+        lines.append(f"Profit factor     : {self.profit_factor:,.2f}  (net of fees)")
+        lines.append("-" * 56)
+        lines.append(f"Gross P&L         : {gross:,.2f}")
+        lines.append(f"Fees paid         : {self.fees_total:,.2f}"
+                     + (f"   ({cost_share:,.1f}% of gross profit)"
+                        if cost_share == cost_share else ""))
+        lines.append(f"Net P&L           : {sum(t.pnl for t in self.trades):,.2f}")
+        if any(t.side == "LIQUIDATED" for t in self.trades):
+            lines.append("!! ACCOUNT WAS LIQUIDATED - trading halted mid-run")
         lines.append("=" * 56)
         return "\n".join(lines)
 
 
 def run(strategy: Strategy, initial: float = 10000.0,
-        fee_bps: float = 0.0) -> Report:
+        fee_bps: float = 0.0, max_leverage: float = 1.0) -> Report:
     bars = strategy.bars
-    closes = [b.c for b in bars]
     cash = initial
     position = 0.0          # units; negative = short
     entry_px = 0.0
-    entry_side = None
-    equity = []
+    entry_side: Optional[str] = None
+    entry_i = 0
+    entry_fee = 0.0
+    equity: List[float] = []
     trades: List[Trade] = []
+    liquidated = False
 
     fee = fee_bps / 10000.0
 
     def equity_now(px):
         return cash + position * px
 
+    def close_position(i: int, px: float, reason: Optional[str] = None):
+        """Flatten at `px`, booking fees INTO the trade record."""
+        nonlocal cash, position, entry_side, entry_fee
+        proceeds = position * px
+        cash += proceeds
+        exit_fee = abs(proceeds) * fee
+        cash -= exit_fee
+        if entry_side == "LONG":
+            gross = (px - entry_px) * abs(position)
+        else:
+            gross = (entry_px - px) * abs(position)
+        fees = entry_fee + exit_fee
+        net = gross - fees
+        notional = entry_px * abs(position)
+        trades.append(Trade(
+            side=reason or entry_side,
+            entry_i=entry_i, exit_i=i,
+            entry_px=entry_px, exit_px=px,
+            pnl=net, pnl_pct=(net / notional) if notional else 0.0,
+            pnl_gross=gross, fees=fees,
+        ))
+        position = 0.0
+        entry_side = None
+        entry_fee = 0.0
+
+    def open_position(i: int, px: float, side: str):
+        nonlocal cash, position, entry_px, entry_side, entry_i, entry_fee
+        # Size off equity (== cash here, since we are flat) with a leverage cap.
+        # The old code sized off `cash` alone, which after a losing short could
+        # be negative -- producing a negative "LONG" position.
+        eq = cash
+        if eq <= 0 or px <= 0:
+            return
+        units = (eq * max_leverage) / px
+        notional = units * px
+        entry_fee = notional * fee
+        cash += -notional if side == "LONG" else notional
+        cash -= entry_fee
+        position = units if side == "LONG" else -units
+        entry_px = px
+        entry_side = side
+        entry_i = i
+
     for i in range(len(bars)):
         px = bars[i].c
-        if i > 0:
+        if i > 0 and not liquidated:
             target = strategy.decide(i)
-            # Execute transition at close of bar i
             if target != entry_side:
-                # Close existing
                 if position != 0:
-                    proceeds = position * px
-                    cash += proceeds
-                    # fee on notional
-                    cash -= abs(proceeds) * fee
-                    if entry_side == "LONG":
-                        pnl = (px - entry_px) * abs(position)
-                    else:
-                        pnl = (entry_px - px) * abs(position)
-                    trades.append(Trade(
-                        side=entry_side,
-                        entry_i=0, exit_i=i,  # entry_i tracked below
-                        entry_px=entry_px, exit_px=px,
-                        pnl=pnl, pnl_pct=pnl / (entry_px * abs(position)) if entry_px else 0,
-                    ))
-                    # fix entry_i using stored value
-                    trades[-1].entry_i = _entry_idx
-                    position = 0.0
-                    entry_side = None
-                # Open new
-                if target == "LONG":
-                    units = cash / px
-                    cash -= units * px
-                    cash -= abs(units * px) * fee
-                    position = units
-                    entry_px = px
-                    entry_side = "LONG"
-                    _entry_idx = i
-                elif target == "SHORT":
-                    units = cash / px
-                    cash += units * px
-                    cash -= abs(units * px) * fee
-                    position = -units
-                    entry_px = px
-                    entry_side = "SHORT"
-                    _entry_idx = i
-        eq = equity_now(px)
-        equity.append(eq)
+                    close_position(i, px)
+                if target in ("LONG", "SHORT"):
+                    open_position(i, px, target)
 
-    # Final liquidation at last close for reporting
-    final = equity[-1]
+        # Margin call. The old engine let a short ride to -17,600 on a 10,000
+        # account and then opened a sign-inverted "LONG" on negative cash.
+        #
+        # Liquidation is intrabar, not at the close: a broker flattens you when
+        # equity touches zero, so we exit at the zero-equity price rather than
+        # letting the bar close somewhere far below it. Only bars the position
+        # was actually held into can trigger it -- we enter at the close, so
+        # the entry bar's own range is already history.
+        if not liquidated and position != 0 and entry_i < i:
+            px_liq = -cash / position
+            breached = (bars[i].l <= px_liq) if position > 0 else (bars[i].h >= px_liq)
+            if breached:
+                close_position(i, px_liq, reason="LIQUIDATED")
+                liquidated = True
+
+        equity.append(equity_now(px))
+
+    # Flatten any open position at the final close so reported trades and the
+    # equity curve agree.
+    if position != 0 and bars:
+        close_position(len(bars) - 1, bars[-1].c)
+        equity[-1] = equity_now(bars[-1].c)
+
+    final = equity[-1] if equity else initial
     total_return = final / initial - 1.0
 
     # Drawdown
-    peak = equity[0]
+    peak = equity[0] if equity else initial
     max_dd = 0.0
     for eq in equity:
         peak = max(peak, eq)
@@ -502,7 +614,10 @@ def run(strategy: Strategy, initial: float = 10000.0,
     gross_loss = abs(sum(t.pnl for t in losses))
     profit_factor = (gross_win / gross_loss) if gross_loss > 0 else float("inf")
 
-    # Sharpe on per-bar returns (annualized assuming ~252 bars/yr proxy)
+    # Sharpe on per-bar returns, annualized by the bar size actually present.
+    # The old code hardcoded sqrt(252); on 1-minute bars that overstated
+    # Sharpe by roughly sqrt(1380) ~ 37x.
+    ppy = bars_per_year(bars)
     rets = []
     for a, b in zip(equity[1:], equity[:-1]):
         if b > 0:
@@ -511,7 +626,7 @@ def run(strategy: Strategy, initial: float = 10000.0,
         m = sum(rets) / len(rets)
         var = sum((r - m) ** 2 for r in rets) / len(rets)
         sd = math.sqrt(var) if var > 0 else 0.0
-        sharpe = (m / sd * math.sqrt(252)) if sd > 0 else 0.0
+        sharpe = (m / sd * math.sqrt(ppy)) if sd > 0 else 0.0
     else:
         sharpe = 0.0
 
