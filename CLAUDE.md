@@ -9,6 +9,22 @@ Last updated: 2026-08-11.
 
 ---
 
+## THREE different scripts exist. Do not confuse them.
+
+A previous session missed this and it wasted the user's time. Read this table first.
+
+| # | Name | Where it is | What it is |
+|---|---|---|---|
+| **1** | **The PAID one** — "Bman Studios" | **Nowhere in this repo. We never had its code.** Its settings panel is transcribed in `fixtures/paid_version_settings.md` | Closed-source, invite-only, $340/yr. Stefan trialled it. Known *only* from screenshots he took. This is the thing being investigated. |
+| **2** | **The ORIGINAL** — jdehorty's | `lorentzian_classification.pine` | Free, public, MPL-2.0. "Machine Learning: Lorentzian Classification v2.0". **This is the engine inside #1.** Keep byte-identical. |
+| **3** | **OURS** — the rebuild | `pine/lorentzian_full.pine` (generated) | #2 **plus** an add-on reproducing #1's extra features. This is the deliverable Stefan pastes into TradingView. Built by `build_pine.py` from #2 + `pine/addon_smc_brackets.pine`. |
+
+In one sentence: **the seller took #2, bolted on a trade-management layer, and sells it as
+#1 for $340/yr — so we rebuilt that layer ourselves on top of #2 and got #3, for free.**
+
+The screenshots of #1 exist only in the chat that captured them. **`fixtures/paid_version_settings.md`
+is the only durable record** — read it before reasoning about what the paid version does.
+
 ## What the user is actually doing
 
 Stefan is a trader, not a developer. Explain things plainly, skip the jargon, and don't
@@ -114,6 +130,9 @@ Branch `claude/waiting-for-details-56uiem`, draft PR #1.
 - `build_pine.py` — concatenates the two into `pine/lorentzian_full.pine` and patches
   `shorttitle` (upstream's is 30 chars; TradingView caps it at 10) and
   `max_boxes_count`/`max_lines_count` (default 50 is too low).
+- `fixtures/paid_version_settings.md` — **the paid version's full settings panel,
+  transcribed from Stefan's screenshots.** The images are not in the repo, so this is the
+  only durable record of what script #1 actually contains. Evidence, not config.
 - `fixtures/CAPTURE.md` — trial-capture checklist. **Probably now moot; the trial has
   likely expired.**
 
