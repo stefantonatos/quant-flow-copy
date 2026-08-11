@@ -49,6 +49,16 @@ def main() -> None:
             "changed shape; re-check build_pine.py against the new source")
     base = base.replace(old_decl, new_decl, 1)
 
+    # TradingView caps shorttitle at 10 characters and rejects the script on
+    # save otherwise. Upstream's is 30 ("Lorentzian Classification v2.0"), which
+    # the compiler now flags as SHORT_TITLE_TOO_LONG.
+    old_short = 'shorttitle="Lorentzian Classification v2.0"'
+    new_short = 'shorttitle="LC v2"'
+    if old_short not in base:
+        raise SystemExit(
+            "could not find the shorttitle to patch -- upstream changed shape")
+    base = base.replace(old_short, new_short, 1)
+
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as f:
         f.write(base + "\n\n" + BANNER + "\n" + addon)

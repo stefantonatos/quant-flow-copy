@@ -192,7 +192,7 @@ var float tSL    = na
 var float tTP1   = na
 var float tTP2   = na
 var float tBE    = na
-var bool  tIsLong = na
+var bool  tIsLong = false
 
 buildBracket(bool isLong) =>
     entry = close

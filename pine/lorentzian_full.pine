@@ -2,7 +2,7 @@
 // ©jdehorty
 
 // @version=6
-indicator(title="Machine Learning: Lorentzian Classification", shorttitle="Lorentzian Classification v2.0", overlay=true, precision=4, max_labels_count=500, max_boxes_count=500, max_lines_count=500)
+indicator(title="Machine Learning: Lorentzian Classification", shorttitle="LC v2", overlay=true, precision=4, max_labels_count=500, max_boxes_count=500, max_lines_count=500)
 
 import jdehorty/MLExtensions/2 as ml
 import jdehorty/KernelFunctions/2 as kernels
@@ -866,7 +866,7 @@ var float tSL    = na
 var float tTP1   = na
 var float tTP2   = na
 var float tBE    = na
-var bool  tIsLong = na
+var bool  tIsLong = false
 
 buildBracket(bool isLong) =>
     entry = close
