@@ -1,0 +1,295 @@
+// ============================================================================
+// ==== ADD-ON: Breaker Blocks / BPR / ATR Brackets / Session Tightening ====
+// ============================================================================
+//
+// Appended to jdehorty's "Machine Learning: Lorentzian Classification" (MPL-2.0).
+// The upstream file above is unmodified; everything below this line is new and
+// re-derived from public ICT/SMC definitions.
+//
+// This reproduces the layers a paid repackaging of that script adds on top:
+// breaker blocks, balanced price range, ATR-derived TP/SL brackets, and
+// session-based tightening. It hooks into upstream's `startLongTrade` /
+// `startShortTrade` and adds no new signal logic of its own.
+//
+// Two deliberate departures from the paid version:
+//
+//   1. Upstream's "Use Worst Case Estimates" toggle is LEFT INTACT. It is off
+//      by default, which means the stats table scores optimistic mid-bar
+//      entries and does not avoid intrabar repainting. The paid version
+//      removed this switch; keeping it lets you see the conservative number.
+//
+//   2. The stats table reports expectancy, payoff ratio and breakeven win
+//      rate. A win rate alone is not a result: with TP1 at 1R you need 50% to
+//      break even, so "72%" means nothing until the payoff ratio sits next to
+//      it. Note also upstream's own warning on that table -- it is a
+//      calibration aid, not a backtest.
+
+// ==================
+// ==== Inputs ======
+// ==================
+
+grpOB   = "Breaker Blocks"
+grpBPR  = "Balanced Price Range"
+grpTP   = "Take Profit / Stop Loss (PD Arrays)"
+grpSess = "Session-Based Tightening"
+grpDisp = "Display"
+
+pivotLookback  = input.int(5,  "Pivot Lookback (Swing Detection)", minval=1, group=grpOB, tooltip="Bars either side of a swing point. A pivot is only confirmed this many bars after it forms.")
+maxTrackedOBs  = input.int(25, "Max Tracked Order Blocks", minval=1, maxval=100, group=grpOB)
+showOBs        = input.bool(true, "Show Order / Breaker Blocks", group=grpOB)
+
+showBPR        = input.bool(true, "Show BPR (overlapping FVGs)", group=grpBPR)
+
+slBufferATR    = input.float(0.25, "SL Buffer (x ATR)",         minval=0, step=0.05, group=grpTP, tooltip="Padding beyond the anchoring PD array.")
+extraSLATR     = input.float(0.75, "Extra SL Distance (x ATR)", minval=0, step=0.05, group=grpTP)
+tradeZoneWidth = input.int(30, "Trade Zone Width (bars)", minval=1, group=grpTP, tooltip="Drawing width of the TP/SL boxes. Cosmetic -- it does not time-stop the trade.")
+showTPSL       = input.bool(true, "Show TP/SL Levels", group=grpTP)
+
+useSessTighten = input.bool(true, "Tighten SL/TP during Asia & London", group=grpSess)
+asiaSess       = input.session("0000-0900", "Asia Session (exchange time)",   group=grpSess)
+londonSess     = input.session("0700-1600", "London Session (exchange time)", group=grpSess)
+tightenATR     = input.float(0.25, "Tighten Amount (x ATR)",     minval=0, step=0.05, group=grpSess)
+minSLATR       = input.float(0.10, "Minimum SL Distance (x ATR)", minval=0.01, step=0.05, group=grpSess)
+
+beOffsetATR    = input.float(0.15, "Breakeven+ Offset (x ATR)", minval=0, step=0.05, group="Trade Stats")
+
+bullColor      = input.color(#089981, "Bullish Color", group=grpDisp)
+bearColor      = input.color(#F23645, "Bearish Color", group=grpDisp)
+
+// ==================
+// ==== Helpers =====
+// ==================
+
+atrVal = ta.atr(14)
+
+// ta.* calls must execute on EVERY bar to keep their internal state coherent.
+// Calling ta.lowest/ta.highest inside buildBracket() -- which only runs on
+// signal bars -- would silently corrupt them, so they are hoisted here and
+// passed in.
+lo20 = ta.lowest(low, 20)
+hi20 = ta.highest(high, 20)
+
+// Sessions overlap 07:00-09:00. Tightening is applied once, not stacked.
+inAsia   = not na(time(timeframe.period, asiaSess,   syminfo.timezone))
+inLondon = not na(time(timeframe.period, londonSess, syminfo.timezone))
+inTightenWindow = useSessTighten and (inAsia or inLondon)
+
+// ==========================
+// ==== Order / Breakers ====
+// ==========================
+//
+// A bullish order block is the last down-candle before the impulse that made a
+// swing low. Once price closes back through it, it is "mitigated" and flips
+// polarity -- that flipped block is a breaker.
+
+type OB
+    float top
+    float bot
+    int   startBar
+    bool  bullish
+    bool  broken
+    box   drawn
+
+var array<OB> obs = array.new<OB>()
+
+pivotHi = ta.pivothigh(high, pivotLookback, pivotLookback)
+pivotLo = ta.pivotlow(low,   pivotLookback, pivotLookback)
+
+// The pivot is confirmed `pivotLookback` bars after it formed, so look back
+// that far to find the originating candle.
+addOB(bool isBull) =>
+    idx = pivotLookback
+    // walk back for the last opposing candle before the impulse
+    found = -1
+    for k = idx to idx + 10
+        if isBull and close[k] < open[k]
+            found := k
+            break
+        if not isBull and close[k] > open[k]
+            found := k
+            break
+    if found >= 0
+        o = OB.new(top=math.max(open[found], close[found]),
+                   bot=math.min(open[found], close[found]),
+                   startBar=bar_index - found,
+                   bullish=isBull, broken=false, drawn=na)
+        if showOBs
+            o.drawn := box.new(bar_index - found, o.top, bar_index, o.bot,
+                 border_color=color.new(isBull ? bullColor : bearColor, 40),
+                 bgcolor=color.new(isBull ? bullColor : bearColor, 88))
+        array.push(obs, o)
+        if array.size(obs) > maxTrackedOBs
+            old = array.shift(obs)
+            if not na(old.drawn)
+                box.delete(old.drawn)
+
+if not na(pivotLo)
+    addOB(true)
+if not na(pivotHi)
+    addOB(false)
+
+// Extend live blocks and flip mitigated ones into breakers.
+if array.size(obs) > 0
+    for i = 0 to array.size(obs) - 1
+        o = array.get(obs, i)
+        mitigated = o.bullish ? close < o.bot : close > o.top
+        if mitigated and not o.broken
+            o.broken := true
+            if not na(o.drawn)
+                // a broken block flips polarity: this is the breaker
+                box.set_border_color(o.drawn, color.new(o.bullish ? bearColor : bullColor, 20))
+                box.set_bgcolor(o.drawn, color.new(o.bullish ? bearColor : bullColor, 80))
+        if not na(o.drawn)
+            box.set_right(o.drawn, bar_index)
+
+// ================================
+// ==== Balanced Price Range ======
+// ================================
+//
+// A BPR is the overlap of a bullish and a bearish fair value gap -- a zone
+// that has been left unfilled in both directions.
+
+bullFVG = low > high[2]
+bearFVG = high < low[2]
+
+var box bprBox = na
+
+if showBPR
+    // a bearish FVG overlapping a recent bullish one (or vice versa)
+    if bearFVG
+        for k = 1 to 20
+            if bullFVG[k]
+                ovTop = math.min(low[2], low[k])
+                ovBot = math.max(high, high[k + 2])
+                if ovTop > ovBot
+                    bprBox := box.new(bar_index - k, ovTop, bar_index + 10, ovBot,
+                         border_color=color.new(color.orange, 20),
+                         bgcolor=color.new(color.orange, 82))
+                break
+
+// ==========================================
+// ==== TP / SL from PD arrays ==============
+// ==========================================
+//
+// The stop anchors to the nearest unmitigated PD array beyond entry, padded by
+// (slBuffer + extraSL) * ATR. Targets are then pure R multiples of that
+// distance -- TP1 at 1R, TP2 at 2R -- which reproduces the exact 1.00R / 2.00R
+// geometry observed on the paid version's chart.
+
+nearestPD(bool forLong, float px) =>
+    float best = na
+    if array.size(obs) > 0
+        for i = 0 to array.size(obs) - 1
+            o = array.get(obs, i)
+            if forLong and o.bot < px
+                best := na(best) ? o.bot : math.max(best, o.bot)
+            if not forLong and o.top > px
+                best := na(best) ? o.top : math.min(best, o.top)
+    best
+
+var float tEntry = na
+var float tSL    = na
+var float tTP1   = na
+var float tTP2   = na
+var float tBE    = na
+var bool  tIsLong = na
+
+buildBracket(bool isLong) =>
+    entry = close
+    pad   = (slBufferATR + extraSLATR) * atrVal
+    anchor = nearestPD(isLong, entry)
+    // fall back to the recent swing if no PD array is available yet
+    raw = na(anchor) ? (isLong ? lo20 : hi20) : anchor
+    sl  = isLong ? raw - pad : raw + pad
+    risk = math.abs(entry - sl)
+    if inTightenWindow
+        risk := math.max(risk - tightenATR * atrVal, minSLATR * atrVal)
+    risk := math.max(risk, minSLATR * atrVal)
+    sl   := isLong ? entry - risk : entry + risk
+    [entry, sl, isLong ? entry + risk : entry - risk, isLong ? entry + 2 * risk : entry - 2 * risk, isLong ? entry + beOffsetATR * atrVal : entry - beOffsetATR * atrVal]
+
+if startLongTrade or startShortTrade
+    isLong = startLongTrade
+    [e, s, t1, t2, be] = buildBracket(isLong)
+    tEntry := e
+    tSL    := s
+    tTP1   := t1
+    tTP2   := t2
+    tBE    := be
+    tIsLong := isLong
+    if showTPSL
+        r = bar_index + tradeZoneWidth
+        box.new(bar_index, t2, r, t1, border_color=color.new(bullColor, 30), bgcolor=color.new(bullColor, 85))
+        box.new(bar_index, t1, r, e,  border_color=color.new(bullColor, 50), bgcolor=color.new(bullColor, 92))
+        box.new(bar_index, e,  r, s,  border_color=color.new(bearColor, 30), bgcolor=color.new(bearColor, 85))
+        label.new(r, t2, "TP2: " + str.tostring(t2, format.mintick), style=label.style_label_left, color=bullColor, textcolor=color.white, size=size.small)
+        label.new(r, t1, "TP1: " + str.tostring(t1, format.mintick), style=label.style_label_left, color=bullColor, textcolor=color.white, size=size.small)
+        label.new(r, e,  "Entry: " + str.tostring(e, format.mintick), style=label.style_label_left, color=color.blue, textcolor=color.white, size=size.small)
+        label.new(r, s,  "SL: " + str.tostring(s, format.mintick), style=label.style_label_left, color=bearColor, textcolor=color.white, size=size.small)
+
+// ==========================================
+// ==== Honest bracket stats ================
+// ==========================================
+//
+// Scored on completed bracket outcomes with a pessimistic same-bar rule: if a
+// bar's range covers both the stop and a target, the STOP is taken. OHLC data
+// cannot say which came first, and assuming the target is what flatters a
+// vendor's win rate. TP1 closes half and moves the stop to breakeven+.
+
+var int   bWins   = 0
+var int   bLosses = 0
+var float bSumR   = 0.0
+var bool  bOpen   = false
+var bool  bHalf   = false
+
+if not na(tEntry) and (startLongTrade or startShortTrade)
+    bOpen := true
+    bHalf := false
+
+if bOpen and not (startLongTrade or startShortTrade)
+    risk = math.abs(tEntry - tSL)
+    stopNow = bHalf ? tBE : tSL
+    hitStop = tIsLong ? low <= stopNow : high >= stopNow
+    hitTP1  = tIsLong ? high >= tTP1   : low  <= tTP1
+    hitTP2  = tIsLong ? high >= tTP2   : low  <= tTP2
+
+    if hitStop
+        // pessimistic: stop wins any same-bar ambiguity
+        if bHalf
+            bWins   += 1
+            bSumR   += 0.5 * 1.0 + 0.5 * (beOffsetATR * atrVal / risk)
+        else
+            bLosses += 1
+            bSumR   -= 1.0
+        bOpen := false
+    else if hitTP2
+        bWins += 1
+        bSumR += bHalf ? 0.5 * 1.0 + 0.5 * 2.0 : 2.0
+        bOpen := false
+    else if hitTP1 and not bHalf
+        bHalf := true
+
+bTotal = bWins + bLosses
+bWinRate = bTotal > 0 ? bWins / bTotal * 100 : 0.0
+bExpect  = bTotal > 0 ? bSumR / bTotal : 0.0
+
+var table bt = table.new(position.bottom_right, 2, 6, border_width=1)
+
+if barstate.islast and showTradeStats
+    table.cell(bt, 0, 0, "Bracket Stats", text_color=color.white, bgcolor=color.new(color.gray, 30))
+    table.cell(bt, 1, 0, "pessimistic", text_color=color.white, bgcolor=color.new(color.gray, 30))
+    table.cell(bt, 0, 1, "Trades",      text_color=color.white)
+    table.cell(bt, 1, 1, str.tostring(bTotal), text_color=color.white)
+    table.cell(bt, 0, 2, "Win rate",    text_color=color.white)
+    table.cell(bt, 1, 2, str.tostring(bWinRate, "#.#") + "%", text_color=color.white)
+    table.cell(bt, 0, 3, "Breakeven WR", text_color=color.white)
+    table.cell(bt, 1, 3, "50.0%", text_color=color.white)
+    table.cell(bt, 0, 4, "Expectancy",  text_color=color.white)
+    table.cell(bt, 1, 4, str.tostring(bExpect, "#.###") + " R",
+               text_color=bExpect > 0 ? bullColor : bearColor)
+    table.cell(bt, 0, 5, "Net",         text_color=color.white)
+    table.cell(bt, 1, 5, str.tostring(bSumR, "#.#") + " R",
+               text_color=bSumR > 0 ? bullColor : bearColor)
+
+alertcondition(startLongTrade,  title="Bracket Long",  message="Long | entry {{close}} | {{ticker}} {{interval}}")
+alertcondition(startShortTrade, title="Bracket Short", message="Short | entry {{close}} | {{ticker}} {{interval}}")
