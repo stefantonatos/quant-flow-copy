@@ -221,6 +221,93 @@ def roc(vals: List[float], n: int = 10) -> List[float]:
     return out
 
 
+def wavetrend(vals: List[float], n1: int = 10, n2: int = 11):
+    """Wave Trend oscillator (wt1, wt2), as used by the LazyBear/jdehorty
+    feature set for ML classification."""
+    e1 = ema(vals, n1)
+    diff = [abs(v - e) if e == e else float("nan") for v, e in zip(vals, e1)]
+    diff_clean = [x if x == x else 0.0 for x in diff]
+    e2 = ema(diff_clean, n1)
+    e2 = [x if diff[i] == diff[i] else float("nan") for i, x in enumerate(e2)]
+    ci = [float("nan")] * len(vals)
+    for i, (v, a, b) in enumerate(zip(vals, e1, e2)):
+        if a == a and b == b and b != 0:
+            ci[i] = (v - a) / (0.015 * b)
+    ci_clean = [x if x == x else 0.0 for x in ci]
+    wt1 = ema(ci_clean, n2)
+    wt1 = [x if ci[i] == ci[i] else float("nan") for i, x in enumerate(wt1)]
+    wt1_clean = [x if x == x else 0.0 for x in wt1]
+    wt2 = sma(wt1_clean, 4)
+    wt2 = [x if wt1[i] == wt1[i] else float("nan") for i, x in enumerate(wt2)]
+    return wt1, wt2
+
+
+def cci(bars: List[Bar], n: int = 20) -> List[float]:
+    tp = [(b.h + b.l + b.c) / 3.0 for b in bars]
+    tp_sma = sma(tp, n)
+    out = [float("nan")] * len(bars)
+    for i in range(len(bars)):
+        if tp_sma[i] != tp_sma[i]:
+            continue
+        window = tp[i - n + 1 : i + 1]
+        mean = tp_sma[i]
+        mad = sum(abs(x - mean) for x in window) / n
+        out[i] = (tp[i] - mean) / (0.015 * mad) if mad > 0 else 0.0
+    return out
+
+
+def _wilder_sum(vals: List[float], n: int) -> List[float]:
+    """Wilder's running-sum smoothing (used for DMI, not a plain average)."""
+    out = [0.0] * len(vals)
+    if len(vals) < n:
+        return out
+    s = sum(vals[:n])
+    out[n - 1] = s
+    for i in range(n, len(vals)):
+        s = s - s / n + vals[i]
+        out[i] = s
+    return out
+
+
+def adx(bars: List[Bar], n: int = 14) -> List[float]:
+    """Average Directional Index, Wilder's method."""
+    ln = len(bars)
+    plus_dm = [0.0] * ln
+    minus_dm = [0.0] * ln
+    tr = [0.0] * ln
+    for i in range(1, ln):
+        up = bars[i].h - bars[i - 1].h
+        dn = bars[i - 1].l - bars[i].l
+        plus_dm[i] = up if (up > dn and up > 0) else 0.0
+        minus_dm[i] = dn if (dn > up and dn > 0) else 0.0
+        tr[i] = max(bars[i].h - bars[i].l, abs(bars[i].h - bars[i - 1].c), abs(bars[i].l - bars[i - 1].c))
+    tr_s = _wilder_sum(tr, n)
+    pdm_s = _wilder_sum(plus_dm, n)
+    mdm_s = _wilder_sum(minus_dm, n)
+    pdi = [100 * p / t if t else 0.0 for p, t in zip(pdm_s, tr_s)]
+    mdi = [100 * m / t if t else 0.0 for m, t in zip(mdm_s, tr_s)]
+    dx = [100 * abs(p - m) / (p + m) if (p + m) else 0.0 for p, m in zip(pdi, mdi)]
+    out = _wilder_sum(dx, n)
+    out = [x / n if x else 0.0 for x in out]  # Wilder's DX smoothing is an average, unlike TR/DM
+    for i in range(min(2 * n, ln)):
+        out[i] = float("nan")
+    return out
+
+
+def normalize01(vals: List[float]) -> List[float]:
+    """Running historic min-max normalize to [0, 1] (matches jdehorty's
+    MLExtensions `normalize`, used for unbounded features like WT/CCI)."""
+    out = [float("nan")] * len(vals)
+    lo, hi = float("inf"), float("-inf")
+    for i, v in enumerate(vals):
+        if v != v:
+            continue
+        lo, hi = min(lo, v), max(hi, v)
+        span = hi - lo
+        out[i] = (v - lo) / span if span > 1e-10 else 0.5
+    return out
+
+
 # ----------------------------------------------------------------------------
 # Strategy base + trade record
 # ----------------------------------------------------------------------------

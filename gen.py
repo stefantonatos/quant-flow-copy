@@ -31,6 +31,12 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
     """
     t = text.lower()
 
+    # ---- Lorentzian Classification (ML / KNN) ----
+    if "lorentzian" in t or "knn" in t or "k-nearest" in t or "machine learning" in t:
+        params = {"neighbors": 8, "max_bars_back": 2000}
+        expl = "Matched LORENTZIAN CLASSIFICATION. KNN over RSI/WaveTrend/CCI/ADX with a kernel-regression trend filter."
+        return "lorentzian", params, expl
+
     # ---- MACD ----
     if "macd" in t:
         params = {"fast": 12, "slow": 26, "signal": 9}

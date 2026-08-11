@@ -11,9 +11,12 @@ or breakout signal stays on until its exit condition actually fires.
 """
 from __future__ import annotations
 
+import math
+
 from engine import (
     Strategy, Bar, sma, ema, rsi, atr, bollinger, highest, lowest,
     macd, stochastic, vwap_rolling, supertrend, roc,
+    wavetrend, cci, adx, normalize01,
 )
 from typing import List
 
@@ -306,6 +309,169 @@ class MomentumROC(Strategy):
                 f"plot(r, color=color.purple)\n")
 
 
+class LorentzianClassification(Strategy):
+    name = "Lorentzian Classification"
+    description = ("ML: KNN over Lorentzian distance across RSI/WaveTrend/CCI/ADX features, "
+                    "filtered by regime + volatility + kernel-regression trend. Port of "
+                    "jdehorty's public indicator (see lorentzian_classification.pine).")
+
+    def prepare(self):
+        p = self.params
+        bars, closes, n = self.bars, self.closes, len(self.bars)
+        neighbors_count = p.get("neighbors", 8)
+        max_bars_back = p.get("max_bars_back", 2000)
+
+        # Feature Engineering: the reference indicator's default 5-feature recipe
+        f1 = [x / 100.0 if x == x else float("nan") for x in rsi(closes, 14)]
+        wt1, wt2 = wavetrend(closes, 10, 11)
+        f2 = normalize01([a - b if a == a and b == b else float("nan") for a, b in zip(wt1, wt2)])
+        f3 = normalize01(cci(bars, 20))
+        f4 = [x / 100.0 if x == x else float("nan") for x in adx(bars, 20)]
+        f5 = [x / 100.0 if x == x else float("nan") for x in rsi(closes, 9)]
+        feats = list(zip(f1, f2, f3, f4, f5))
+
+        def lorentzian_dist(a, b):
+            return sum(math.log1p(abs(x - y)) for x, y in zip(a, b))
+
+        # Training labels: sign of the trailing 4-bar move, exactly as the
+        # indicator computes it live (see lorentzian_classification.pine:335)
+        labels = [0] * n
+        for i in range(4, n):
+            labels[i] = 1 if closes[i - 4] < closes[i] else (-1 if closes[i - 4] > closes[i] else 0)
+
+        max_bars_back_index = n - 1 - max_bars_back if n - 1 >= max_bars_back else 0
+        start_index = max_bars_back_index  # includeFullHistory=False (indicator default)
+
+        # Approximate Nearest Neighbors search, Lorentzian distance.
+        # ponytail: O(n^2) full rescan per bar, same cost as the source indicator's
+        # per-bar loop over [startIndex..bar_index]; fine under a few thousand bars,
+        # switch to a spatial index (k-d tree) if max_bars_back needs to grow a lot.
+        predictions_sum = [0] * n
+        for j in range(max_bars_back_index, n):
+            if any(v != v for v in feats[j]):
+                continue
+            last_distance = -1.0
+            distances: List[float] = []
+            preds: List[int] = []
+            for i in range(start_index, j + 1):
+                if any(v != v for v in feats[i]):
+                    continue
+                d = lorentzian_dist(feats[j], feats[i])
+                if d >= last_distance and i % 4 != 0:
+                    last_distance = d
+                    distances.append(d)
+                    preds.append(labels[i])
+                    if len(preds) > neighbors_count:
+                        last_distance = distances[round(neighbors_count * 3 / 4)]
+                        distances.pop(0)
+                        preds.pop(0)
+            predictions_sum[j] = sum(preds)
+
+        # Filters: volatility (short ATR > long ATR) + regime (Kalman-like slope filter)
+        atr_short, atr_long = atr(bars, 1), atr(bars, 10)
+        vol_ok = [(s == s and l == l and s > l) for s, l in zip(atr_short, atr_long)]
+
+        regime_threshold = p.get("regime_threshold", -0.1)
+        ohlc4 = [(b.o + b.h + b.l + b.c) / 4.0 for b in bars]
+        value1 = value2 = klmf = 0.0
+        abs_slope = [0.0] * n
+        for i in range(n):
+            prev_src = ohlc4[i - 1] if i > 0 else ohlc4[i]
+            value1 = 0.2 * (ohlc4[i] - prev_src) + 0.8 * value1
+            value2 = 0.1 * (bars[i].h - bars[i].l) + 0.8 * value2
+            omega = abs(value1 / value2) if value2 else 0.0
+            alpha = (-omega ** 2 + math.sqrt(omega ** 4 + 16 * omega ** 2)) / 8
+            prev_klmf = klmf
+            klmf = alpha * ohlc4[i] + (1 - alpha) * prev_klmf
+            abs_slope[i] = abs(klmf - prev_klmf)
+        avg_slope = ema(abs_slope, 200)
+        regime_ok = []
+        for i in range(n):
+            a = avg_slope[i]
+            regime_ok.append(True if (a != a or a == 0) else (abs_slope[i] - a) / a >= regime_threshold)
+
+        filter_all = [v and r for v, r in zip(vol_ok, regime_ok)]
+
+        # Signal: sticky state, flips only on a filtered non-zero prediction
+        signal = [0] * n
+        s = 0
+        for i in range(n):
+            if predictions_sum[i] > 0 and filter_all[i]:
+                s = 1
+            elif predictions_sum[i] < 0 and filter_all[i]:
+                s = -1
+            signal[i] = s
+
+        # Kernel regression (Nadaraya-Watson, rational quadratic) trend filter
+        h, r, x_start = p.get("kernel_h", 8), p.get("kernel_r", 8.0), p.get("kernel_x", 25)
+        window = min(n, 300)  # weights decay ~i^2, bars beyond this are negligible
+        is_bullish_rate = [False] * n
+        is_bearish_rate = [False] * n
+        prev_yhat = float("nan")
+        for j in range(n):
+            if j < x_start:
+                continue
+            cw = tw = 0.0
+            for i in range(min(j + 1, window)):
+                w = (1 + (i * i) / (h * h * 2 * r)) ** (-r)
+                cw += closes[j - i] * w
+                tw += w
+            yhat = cw / tw if tw else float("nan")
+            if prev_yhat == prev_yhat and yhat == yhat:
+                is_bullish_rate[j] = prev_yhat < yhat
+                is_bearish_rate[j] = prev_yhat > yhat
+            prev_yhat = yhat
+
+        # Entries: a fresh signal flip that agrees with the kernel's direction
+        start_long = [False] * n
+        start_short = [False] * n
+        for i in range(1, n):
+            different = signal[i] != signal[i - 1]
+            if signal[i] == 1 and different and is_bullish_rate[i]:
+                start_long[i] = True
+            elif signal[i] == -1 and different and is_bearish_rate[i]:
+                start_short[i] = True
+
+        # Exits: strict 4-bar hold (indicator default, useDynamicExits=False)
+        end_long = [False] * n
+        end_short = [False] * n
+        bars_held = 0
+        for i in range(1, n):
+            different = signal[i] != signal[i - 1]
+            bars_held = 0 if different else bars_held + 1
+            held4 = bars_held == 4
+            held_lt4 = 0 < bars_held < 4
+            if i >= 4:
+                last_was_buy = signal[i - 4] == 1
+                last_was_sell = signal[i - 4] == -1
+                if ((held4 and last_was_buy) or (held_lt4 and signal[i] == -1 and different and last_was_buy)) and start_long[i - 4]:
+                    end_long[i] = True
+                if ((held4 and last_was_sell) or (held_lt4 and signal[i] == 1 and different and last_was_sell)) and start_short[i - 4]:
+                    end_short[i] = True
+
+        # Collapse start/end events into a running position for decide(i)
+        positions = ["FLAT"] * n
+        pos = "FLAT"
+        for i in range(n):
+            if pos == "LONG" and end_long[i]:
+                pos = "FLAT"
+            if pos == "SHORT" and end_short[i]:
+                pos = "FLAT"
+            if start_long[i]:
+                pos = "LONG"
+            elif start_short[i]:
+                pos = "SHORT"
+            positions[i] = pos
+        self.positions = positions
+
+    def decide(self, i):
+        return self.positions[i]
+
+    def to_pine(self):
+        return ("// Full Pine Script v6 source: see lorentzian_classification.pine\n"
+                "// in the repo root (jdehorty's public indicator, MPL 2.0).\n")
+
+
 REGISTRY = {
     "sma": SMACrossover,
     "rsi": RSIMeanReversion,
@@ -317,6 +483,7 @@ REGISTRY = {
     "vwap": VWAPReversion,
     "supertrend": SupertrendFollow,
     "roc": MomentumROC,
+    "lorentzian": LorentzianClassification,
 }
 
 

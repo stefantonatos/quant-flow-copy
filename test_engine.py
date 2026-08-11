@@ -6,7 +6,7 @@ Run directly:  python test_engine.py
 from __future__ import annotations
 
 import data as D
-from engine import atr, macd, stochastic, vwap_rolling, supertrend, roc, run, Report
+from engine import atr, macd, stochastic, vwap_rolling, supertrend, roc, wavetrend, run, Report
 from strategies import REGISTRY
 
 
@@ -49,6 +49,21 @@ def test_supertrend_direction_flips():
 
 def test_roc_zero_at_flat_price():
     assert roc([100.0] * 20, 10)[15] == 0.0
+
+
+def test_wavetrend_no_longer_all_nan():
+    closes = [b.c for b in D.load_csv(D.sample_csv())]
+    wt1, wt2 = wavetrend(closes, 10, 11)
+    assert any(x == x for x in wt1), "wt1 should have real values once warmed up (regression: ema() NaN-seed poisoning)"
+    assert any(x == x for x in wt2)
+
+
+def test_lorentzian_classification_resolves_a_signal():
+    bars = D.load_csv(D.sample_csv())
+    strat = REGISTRY["lorentzian"](bars=bars, params={})
+    seen = set(strat.positions)
+    assert seen != {"FLAT"}, "should take at least one position once warmed up (regression: wavetrend NaN-poisoning made every feature NaN)"
+    assert seen <= {"LONG", "SHORT", "FLAT"}
 
 
 def test_all_registered_strategies_run_without_error():
