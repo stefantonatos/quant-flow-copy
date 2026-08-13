@@ -31,6 +31,15 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
     """
     t = text.lower()
 
+    # ---- Opening Range Breakout (check before the generic "breakout" -> donchian match) ----
+    if "orb" in t.split() or "opening range" in t:
+        n = _first_int(t, 6)
+        params = {"range_bars": n, "flatten_eod": True}
+        expl = (f"Matched OPENING RANGE BREAKOUT (first {n} bars/session). "
+                f"Long above the opening range high, short below the opening range low, flat by session close. "
+                f"Needs intraday bars to mean anything.")
+        return "orb", params, expl
+
     # ---- Bollinger Bands + RSI combo ----
     if ("bollinger" in t or "band" in t) and ("rsi" in t or "oversold" in t or "overbought" in t):
         n = _first_int(t, 20)

@@ -11,6 +11,7 @@ or breakout signal stays on until its exit condition actually fires.
 """
 from __future__ import annotations
 
+import datetime
 import math
 
 from engine import (
@@ -309,6 +310,81 @@ class MomentumROC(Strategy):
                 f"plot(r, color=color.purple)\n")
 
 
+class OpeningRangeBreakout(Strategy):
+    name = "Opening Range Breakout"
+    description = ("Long/short breakout of the first N bars' range each session; "
+                    "flat by session close. Needs intraday bars -- daily data has "
+                    "only 1 bar/session, so the range degenerates to nothing useful.")
+
+    def prepare(self):
+        p = self.params
+        n = p.get("range_bars", 6)
+        bars = self.bars
+        self.flatten_eod = p.get("flatten_eod", True)
+        self.day_of = [datetime.datetime.utcfromtimestamp(b.t).date() for b in bars]
+
+        self.or_high = [float("nan")] * len(bars)
+        self.or_low = [float("nan")] * len(bars)
+        self.in_range = [False] * len(bars)
+        i = 0
+        while i < len(bars):
+            j = i
+            while j < len(bars) and self.day_of[j] == self.day_of[i]:
+                j += 1
+            range_end = min(i + n, j)
+            hh = max(b.h for b in bars[i:range_end])
+            ll = min(b.l for b in bars[i:range_end])
+            for k in range(i, j):
+                self.or_high[k] = hh
+                self.or_low[k] = ll
+                if k < range_end:
+                    self.in_range[k] = True
+            i = j
+        self.holding = "FLAT"
+
+    def decide(self, i):
+        if i == 0 or self.day_of[i] != self.day_of[i - 1]:
+            self.holding = "FLAT"
+        if not self.in_range[i]:
+            c = self.closes[i]
+            if c > self.or_high[i]:
+                self.holding = "LONG"
+            elif c < self.or_low[i]:
+                self.holding = "SHORT"
+        is_last_bar_of_day = (i == len(self.bars) - 1) or (self.day_of[i + 1] != self.day_of[i])
+        if self.flatten_eod and is_last_bar_of_day:
+            self.holding = "FLAT"
+        return self.holding
+
+    def to_pine(self):
+        p = self.params
+        n = p.get("range_bars", 6)
+        return (f"//@version=6\n"
+                f"indicator(\"Opening Range Breakout (free)\", overlay=true)\n"
+                f"// Bar-count range (first {n} bars/session) translated to Pine's session\n"
+                f"// tools -- for intraday charts, set these to your session's open.\n"
+                f"rangeBars = {n}\n"
+                f"newDay = ta.change(time(\"D\"))\n"
+                f"var float orHigh = na\n"
+                f"var float orLow = na\n"
+                f"var int barsIn = 0\n"
+                f"if newDay\n"
+                f"    orHigh := high\n"
+                f"    orLow := low\n"
+                f"    barsIn := 0\n"
+                f"else\n"
+                f"    barsIn += 1\n"
+                f"    if barsIn < rangeBars\n"
+                f"        orHigh := math.max(orHigh, high)\n"
+                f"        orLow := math.min(orLow, low)\n"
+                f"inRange = barsIn < rangeBars\n"
+                f"longCond = not inRange and close > orHigh\n"
+                f"shortCond = not inRange and close < orLow\n"
+                f"plot(orHigh, color=color.green)\nplot(orLow, color=color.red)\n"
+                f"plotshape(longCond, style=shape.triangleup, color=color.green)\n"
+                f"plotshape(shortCond, style=shape.triangledown, color=color.red)\n")
+
+
 class BollingerRSI(Strategy):
     name = "Bollinger Bands + RSI"
     description = "Long when close is below the lower band while RSI is oversold; exit when RSI turns overbought or close breaks back above the upper band."
@@ -526,6 +602,7 @@ REGISTRY = {
     "supertrend": SupertrendFollow,
     "roc": MomentumROC,
     "bollrsi": BollingerRSI,
+    "orb": OpeningRangeBreakout,
     "lorentzian": LorentzianClassification,
 }
 
