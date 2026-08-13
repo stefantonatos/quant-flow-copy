@@ -12,6 +12,7 @@ Usage:
 Flags:
   --data sample|yahoo|stooq|binance
   --symbol SYM        (for yahoo/stooq/binance)
+  --range R           yahoo history range: 1mo/6mo/1y/5y/max (default 1y)
   --source SRC        alias for --data
   --capital N         starting capital (default 10000)
   --fee BPS           per-trade fee in basis points (default 0)
@@ -150,6 +151,7 @@ def main(argv):
     montecarlo = 0
     metric = "sharpe"
     top_n = 5
+    yahoo_range = "1y"
     i = 1 if (compare or optimize_mode) else 0
     while i < len(args):
         a = args[i]
@@ -171,6 +173,8 @@ def main(argv):
             metric = args[i + 1]; i += 2; continue
         if a == "--top":
             top_n = int(args[i + 1]); i += 2; continue
+        if a == "--range":
+            yahoo_range = args[i + 1]; i += 2; continue
         text_parts.append(a); i += 1
 
     text = " ".join(text_parts)
@@ -194,7 +198,7 @@ def main(argv):
         path = D.sample_csv()
         bars = D.load_csv(path)
     elif data_src in ("yahoo", "yf"):
-        bars = D.from_yahoo(symbol or "SPY")
+        bars = D.from_yahoo(symbol or "SPY", range_=yahoo_range)
     elif data_src == "stooq":
         bars = D.from_stooq(symbol or "aapl.us")
     elif data_src == "binance":
