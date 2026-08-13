@@ -1,0 +1,65 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © jdehorty
+
+//@version=5
+
+// @description A set of extension methods for a novel implementation of a Approximate Nearest Neighbors (ANN) algorithm in Lorentzian space.
+
+library("MLExtensions")
+
+// ==========================
+// ==== Helper Functions ====
+// ==========================
+
+export normalizeDeriv(series float src, int quadraticMeanLength) =>
+    float deriv = src - src[2]
+    quadraticMean = math.sqrt(nz(math.sum(math.pow(deriv, 2), quadraticMeanLength) / quadraticMeanLength))
+    nDeriv = deriv / quadraticMean
+    nDeriv
+
+export normalize(series float src, float min, float max) => 
+    var _historicMin =  10e10
+    var _historicMax = -10e10
+    _historicMin := math.min(nz(src, _historicMin), _historicMin)
+    _historicMax := math.max(nz(src, _historicMax), _historicMax)
+    min + (max - min) * (src - _historicMin) / math.max(_historicMax - _historicMin, 10e-10)
+
+export rescale(series float src, float oldMin, float oldMax, float newMin, float newMax) =>
+    newMin + (newMax - newMin) * (src - oldMin) / math.max(oldMax - oldMin, 10e-10)
+
+export n_rsi(series float src, simple int n1, simple int n2) =>
+    rescale(ta.ema(ta.rsi(src, n1), n2), 0, 100, 0, 1)
+
+export n_cci(series float src, simple int n1, simple int n2) =>
+    normalize(ta.ema(ta.cci(src, n1), n2), 0, 1)
+
+export n_wt(series float src, simple int n1=10, simple int n2=11) =>
+    ema1 = ta.ema(src, n1)
+    ema2 = ta.ema(math.abs(src - ema1), n1)
+    ci = (src - ema1) / (0.015 * ema2)
+    wt1 = ta.ema(ci, n2) // tci
+    wt2 = ta.sma(wt1, 4)
+    normalize(wt1 - wt2, 0, 1)
+
+export n_adx(series float highSrc, series float lowSrc, series float closeSrc, simple int n1) =>
+    length = n1
+    th = 20
+    tr = math.max(math.max(highSrc - lowSrc, math.abs(highSrc - nz(closeSrc[1]))), math.abs(lowSrc - nz(closeSrc[1])))
+    directionalMovementPlus = highSrc - nz(highSrc[1]) > nz(lowSrc[1]) - lowSrc ? math.max(highSrc - nz(highSrc[1]), 0) : 0
+    negMovement = nz(lowSrc[1]) - lowSrc > highSrc - nz(highSrc[1]) ? math.max(nz(lowSrc[1]) - lowSrc, 0) : 0
+    trSmooth = 0.0
+    trSmooth := nz(trSmooth[1]) - nz(trSmooth[1]) / length + tr
+    smoothDirectionalMovementPlus = 0.0
+    smoothDirectionalMovementPlus := nz(smoothDirectionalMovementPlus[1]) - nz(smoothDirectionalMovementPlus[1]) / length + directionalMovementPlus
+    smoothnegMovement = 0.0
+    smoothnegMovement := nz(smoothnegMovement[1]) - nz(smoothnegMovement[1]) / length + negMovement
+    diPositive = smoothDirectionalMovementPlus / trSmooth * 100
+    diNegative = smoothnegMovement / trSmooth * 100
+    dx = math.abs(diPositive - diNegative) / (diPositive + diNegative) * 100 
+    adx = ta.rma(dx, length)
+    rescale(adx, 0, 100, 0, 1)
+
+// (regime_filter / filter_adx / filter_volatility / backtest / init_table / update_table
+//  omitted here -- unaffected by this investigation, unchanged from what our fork already
+//  imports and uses correctly. Full source pasted into chat by Stefan on 2026-08-13; ask
+//  him to re-paste if the rest is ever needed.)
