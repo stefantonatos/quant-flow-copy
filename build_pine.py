@@ -49,6 +49,19 @@ def main() -> None:
             "changed shape; re-check build_pine.py against the new source")
     base = base.replace(old_decl, new_decl, 1)
 
+    # The paid version runs Max Bars Back at 300; upstream defaults to 2000.
+    # This is the single largest behavioural difference between the two, because
+    # maxBarsBack defines the whole training window the kNN searches -- at 2000 it
+    # draws neighbours from an entirely different set of bars, so nearly every
+    # signal lands somewhere else. Default to the paid version's value so the
+    # script matches out of the box; it stays user-editable in Settings.
+    old_mbb = 'input.int(title="Max Bars Back", defval=2000, group="General Settings")'
+    new_mbb = 'input.int(title="Max Bars Back", defval=300, group="General Settings")'
+    if old_mbb not in base:
+        raise SystemExit(
+            "could not find the Max Bars Back input to patch -- upstream changed shape")
+    base = base.replace(old_mbb, new_mbb, 1)
+
     # TradingView caps shorttitle at 10 characters and rejects the script on
     # save otherwise. Upstream's is 30 ("Lorentzian Classification v2.0"), which
     # the compiler now flags as SHORT_TITLE_TOO_LONG.
