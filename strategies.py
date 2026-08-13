@@ -385,6 +385,110 @@ class OpeningRangeBreakout(Strategy):
                 f"plotshape(shortCond, style=shape.triangledown, color=color.red)\n")
 
 
+class PowerOfThree(Strategy):
+    name = "Power of 3 (AMD)"
+    description = ("ICT-style Accumulation/Manipulation/Distribution: mark the Asian "
+                    "session's high/low, wait for a London-session liquidity sweep of "
+                    "one side of that range followed by a close back inside (the "
+                    "reversal signal), then trade that direction with a fixed R:R "
+                    "target through the NY session. One trade per day. Needs intraday "
+                    "bars with UTC timestamps -- see the class docstring caveat below.")
+    # Simplification vs. a real bracket order: this engine has no intrabar fills, so
+    # stop/target touches are approximated by checking each bar's high/low against the
+    # levels and flattening at that bar's close -- not a live-accurate fill price. The
+    # MT5 port (mt5/PowerOfThree.mq5) places real SL/TP orders instead; this Python
+    # version is for quick screening/optimization only.
+
+    def prepare(self):
+        p = self.params
+        bars = self.bars
+        n = len(bars)
+        asia_start = p.get("asia_start_hour", 0)
+        asia_end = p.get("asia_end_hour", 8)
+        manip_end = p.get("manip_end_hour", 13)
+        session_end = p.get("session_end_hour", 21)
+        rr = p.get("risk_reward", 2.0)
+
+        hours = [datetime.datetime.utcfromtimestamp(b.t).hour for b in bars]
+        days = [datetime.datetime.utcfromtimestamp(b.t).date() for b in bars]
+        self.positions = ["FLAT"] * n
+
+        i = 0
+        while i < n:
+            j = i
+            while j < n and days[j] == days[i]:
+                j += 1
+            asia_idx = [k for k in range(i, j) if asia_start <= hours[k] < asia_end]
+            if not asia_idx:
+                i = j
+                continue
+            asia_high = max(bars[k].h for k in asia_idx)
+            asia_low = min(bars[k].l for k in asia_idx)
+            swept_high = swept_low = False
+            holding = "FLAT"
+            traded_today = False
+            stop_px = target_px = None
+
+            for k in range(i, j):
+                h = hours[k]
+                if holding == "FLAT" and not traded_today and asia_end <= h < manip_end:
+                    if bars[k].h > asia_high:
+                        swept_high = True
+                    if bars[k].l < asia_low:
+                        swept_low = True
+                    if swept_high and bars[k].c < asia_high:
+                        holding = "SHORT"
+                        traded_today = True
+                        entry = bars[k].c
+                        stop_px = max(bars[m].h for m in range(i, k + 1) if hours[m] < manip_end)
+                        target_px = entry - rr * (stop_px - entry)
+                    elif swept_low and bars[k].c > asia_low:
+                        holding = "LONG"
+                        traded_today = True
+                        entry = bars[k].c
+                        stop_px = min(bars[m].l for m in range(i, k + 1) if hours[m] < manip_end)
+                        target_px = entry + rr * (entry - stop_px)
+                elif holding == "LONG":
+                    if bars[k].l <= stop_px or bars[k].h >= target_px:
+                        holding = "FLAT"
+                elif holding == "SHORT":
+                    if bars[k].h >= stop_px or bars[k].l <= target_px:
+                        holding = "FLAT"
+
+                if h >= session_end:
+                    holding = "FLAT"
+                self.positions[k] = holding
+            i = j
+
+    def decide(self, i):
+        return self.positions[i]
+
+    def to_pine(self):
+        p = self.params
+        return (f"//@version=6\n"
+                f"indicator(\"Power of 3 / AMD (free)\", overlay=true)\n"
+                f"// Session hours below are UTC -- adjust for your chart's timezone.\n"
+                f"asiaStart = {p.get('asia_start_hour', 0)}\n"
+                f"asiaEnd = {p.get('asia_end_hour', 8)}\n"
+                f"manipEnd = {p.get('manip_end_hour', 13)}\n"
+                f"h = hour(time, \"UTC\")\n"
+                f"newDay = ta.change(dayofmonth(time, \"UTC\"))\n"
+                f"var float asiaHigh = na\nvar float asiaLow = na\nvar bool sweptHigh = false\nvar bool sweptLow = false\nvar bool tradedToday = false\n"
+                f"if newDay\n    asiaHigh := na\n    asiaLow := na\n    sweptHigh := false\n    sweptLow := false\n    tradedToday := false\n"
+                f"inAsia = h >= asiaStart and h < asiaEnd\n"
+                f"if inAsia\n    asiaHigh := na(asiaHigh) ? high : math.max(asiaHigh, high)\n    asiaLow := na(asiaLow) ? low : math.min(asiaLow, low)\n"
+                f"inManip = h >= asiaEnd and h < manipEnd and not tradedToday and not na(asiaHigh)\n"
+                f"if inManip\n"
+                f"    sweptHigh := sweptHigh or high > asiaHigh\n"
+                f"    sweptLow := sweptLow or low < asiaLow\n"
+                f"longCond = inManip and sweptLow and close > asiaLow\n"
+                f"shortCond = inManip and sweptHigh and close < asiaHigh\n"
+                f"if longCond or shortCond\n    tradedToday := true\n"
+                f"plot(asiaHigh, color=color.orange)\nplot(asiaLow, color=color.orange)\n"
+                f"plotshape(longCond, style=shape.triangleup, color=color.green)\n"
+                f"plotshape(shortCond, style=shape.triangledown, color=color.red)\n")
+
+
 class BollingerRSI(Strategy):
     name = "Bollinger Bands + RSI"
     description = "Long when close is below the lower band while RSI is oversold; exit when RSI turns overbought or close breaks back above the upper band."
@@ -603,6 +707,7 @@ REGISTRY = {
     "roc": MomentumROC,
     "bollrsi": BollingerRSI,
     "orb": OpeningRangeBreakout,
+    "po3": PowerOfThree,
     "lorentzian": LorentzianClassification,
 }
 

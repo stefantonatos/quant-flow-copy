@@ -110,6 +110,28 @@ def test_orb_flat_during_range_then_breaks_out():
     assert positions[8] == "SHORT", "should short a breakout below the new session's own opening range low"
 
 
+def test_po3_sweep_reversal_and_one_trade_per_day():
+    day1 = 86400 * 20000  # midnight-aligned, hourly bars
+    bars = [
+        Bar(t=day1+0*3600, o=100, h=101, l=99,  c=100),   # Asia (0-7): range [98,102]
+        Bar(t=day1+1*3600, o=100, h=102, l=99,  c=101),
+        Bar(t=day1+2*3600, o=101, h=101, l=98,  c=100),
+        Bar(t=day1+3*3600, o=100, h=101, l=99,  c=100),
+        Bar(t=day1+4*3600, o=100, h=101, l=99,  c=100),
+        Bar(t=day1+5*3600, o=100, h=101, l=99,  c=100),
+        Bar(t=day1+6*3600, o=100, h=101, l=99,  c=100),
+        Bar(t=day1+7*3600, o=100, h=101, l=99,  c=100),
+        Bar(t=day1+8*3600, o=100, h=100, l=97,  c=99),    # manip: sweeps low(97<98), closes back above 98 -> LONG
+        Bar(t=day1+9*3600, o=99,  h=104, l=99,  c=103),   # target hit (entry~99, stop~97, 2R target~103)
+        Bar(t=day1+10*3600,o=103, h=100, l=90,  c=95),    # sweeps low again post-exit -- must NOT re-enter (one/day)
+    ]
+    strat = REGISTRY["po3"](bars=bars, params={"risk_reward": 2.0})
+    positions = [strat.decide(i) for i in range(len(bars))]
+    assert all(p == "FLAT" for p in positions[0:8]), "should stay flat through the Asian range"
+    assert positions[8] == "LONG", "should go long on a swept-low reversal back inside the range"
+    assert positions[10] == "FLAT", "must not take a second trade the same day after the first exits"
+
+
 def test_verdict_returns_known_grade():
     bars = D.load_csv(D.sample_csv())
     strat = REGISTRY["sma"](bars=bars, params={})

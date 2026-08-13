@@ -31,6 +31,17 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
     """
     t = text.lower()
 
+    # ---- Power of 3 / AMD (ICT-style accumulation/manipulation/distribution) ----
+    if "power of 3" in t or "po3" in t.split() or "accumulation" in t or "amd" in t.split():
+        rr = 2.0
+        m = re.search(r"(\d+\.?\d*)\s*r\b", t)
+        if m:
+            rr = float(m.group(1))
+        params = {"risk_reward": rr}
+        expl = (f"Matched POWER OF 3 / AMD (target {rr}R). Marks the Asian range, waits for a London "
+                f"sweep + close-back-inside, trades the reversal through NY. One trade/day.")
+        return "po3", params, expl
+
     # ---- Opening Range Breakout (check before the generic "breakout" -> donchian match) ----
     if "orb" in t.split() or "opening range" in t:
         n = _first_int(t, 6)

@@ -72,6 +72,7 @@ BUILT-IN STRATEGY LIBRARY
   roc         Momentum ROC
   lorentzian  Lorentzian Classification (ML/KNN, port of jdehorty's public indicator)
   orb         Opening Range Breakout (needs intraday bars -- see --interval below)
+  po3         Power of 3 / AMD (ICT-style session sweep-reversal, needs intraday bars)
 
 Run `python run.py list` for live descriptions.
 
