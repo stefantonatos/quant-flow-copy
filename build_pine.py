@@ -49,14 +49,20 @@ def main() -> None:
             "changed shape; re-check build_pine.py against the new source")
     base = base.replace(old_decl, new_decl, 1)
 
-    # The paid version runs Max Bars Back at 300; upstream defaults to 2000.
-    # This is the single largest behavioural difference between the two, because
-    # maxBarsBack defines the whole training window the kNN searches -- at 2000 it
-    # draws neighbours from an entirely different set of bars, so nearly every
-    # signal lands somewhere else. Default to the paid version's value so the
-    # script matches out of the box; it stays user-editable in Settings.
+    # Max Bars Back defines the whole training window the kNN searches, so it is
+    # the single largest behavioural lever: change it and the model draws its
+    # neighbours from a different set of bars, and nearly every signal moves.
+    #
+    # Upstream defaults to 2000. The paid version's settings panel showed 300
+    # (fixtures/paid_version_settings.md), but its on-chart status line later read
+    # "8 500 4 100 5 ..." -- i.e. 500. The user changes it, so there is no single
+    # right constant here.
+    #
+    # THE STATUS LINE IS THE GROUND TRUTH. It prints every input in order, so to
+    # match the paid version, read its status line and mirror the numbers. 500 is
+    # the last observed value; it stays user-editable in Settings.
     old_mbb = 'input.int(title="Max Bars Back", defval=2000, group="General Settings")'
-    new_mbb = 'input.int(title="Max Bars Back", defval=300, group="General Settings")'
+    new_mbb = 'input.int(title="Max Bars Back", defval=500, group="General Settings")'
     if old_mbb not in base:
         raise SystemExit(
             "could not find the Max Bars Back input to patch -- upstream changed shape")
