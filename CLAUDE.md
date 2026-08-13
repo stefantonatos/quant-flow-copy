@@ -52,6 +52,41 @@ network without checking which environment you're actually in.
 the paid-version findings, the compile status, and the open/next items. This section is
 additive, not a correction to the Pine-side work.
 
+## Update: MT5 port added (2026-08-13)
+
+Stefan asked to backtest through MetaTrader 5. No free, open-source MQL5 port of
+jdehorty's indicator exists anywhere (checked the MQL5 marketplace — only paid or
+closed-source `.ex5` products, or an unfilled freelance job posting). So it was ported
+from scratch: **`mt5/LorentzianClassification.mq5`**, an Expert Advisor (not a plain
+indicator) since the ask was backtesting, and MT5's Strategy Tester needs an EA to place
+trades and produce a performance report.
+
+Scope matches the Python port in `strategies.py` (`LorentzianClassification`), not the
+full `pine/lorentzian_full.pine` — core ML entry/exit logic only (KNN over Lorentzian
+distance, regime + volatility filters, kernel trend filter, strict 4-bar exits), no
+SL/TP brackets, no SMC layer. Feature/filter defaults mirror the Pine ones this file
+documents above.
+
+**One deliberate, documented deviation:** Pine's `maxBarsBack` window is anchored to the
+whole loaded chart's known length (`last_bar_index`), which doesn't exist in an EA
+processing bars one at a time like a live feed. The port uses a sliding "most recent N
+bars" training window instead. Comment this clearly in the `.mq5` file's header — don't
+let a future session "fix" it back to a Pine-literal translation without understanding
+why it changed.
+
+Built-in MT5 indicators (`iRSI`, `iCCI`, `iADX`, `iATR`, `iMA`) are used wherever they
+exist instead of hand-rolling — only WaveTrend (not built into MT5) and the KNN/regime
+filter/kernel regression logic are hand-rolled, using persistent recursive state
+(`static`/global variables updated once per bar) rather than recomputing from scratch,
+matching how Pine's own `ta.*` functions and `var`-declared state work internally. This
+also matters for performance: recomputing from scratch each bar would be O(n²) even
+worse than the algorithm's inherent O(n·maxBarsBack) cost.
+
+**Status: written, NOT yet compiled.** No MQL5 compiler is available outside MetaEditor
+itself. Ask Stefan to paste it into MetaEditor, compile, and report the exact error text
+— same paste → error → fix loop already used for the Pine file. Don't assume it compiles
+clean on the first try; two rounds were needed for the Pine file too.
+
 ## THREE different scripts exist. Do not confuse them.
 
 A previous session missed this and it wasted the user's time. Read this table first.
