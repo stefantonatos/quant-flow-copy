@@ -31,6 +31,7 @@ PARAM_GRIDS: Dict[str, Dict[str, list]] = {
     "roc": {"n": [5, 10, 20]},
     "bollrsi": {"n": [15, 20, 25], "rsi_n": [10, 14], "oversold": [25, 30], "overbought": [70, 75]},
     "orb": {"range_bars": [3, 6, 12, 24]},
+    "po3": {"risk_reward": [1.0, 1.5, 2.0, 3.0], "manip_end_hour": [11, 13, 16]},
     "lorentzian": {"neighbors": [5, 8, 12], "max_bars_back": [1000, 2000]},
 }
 
