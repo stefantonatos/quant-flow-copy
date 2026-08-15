@@ -315,6 +315,51 @@ def adx(bars: List[Bar], n: int = 14) -> List[float]:
     return out
 
 
+def pivots(bars: List[Bar], left: int = 5, right: int = 5):
+    """Swing high/low detection, matching Pine's ta.pivothigh / ta.pivotlow.
+
+    A pivot high at bar `i` needs `left` strictly-lower highs before it and
+    `right` strictly-lower highs after it (mirrored for lows). Returns two
+    parallel boolean lists indexed by the bar the pivot IS, not the bar it
+    became knowable on.
+
+    THE LOOKAHEAD TRAP: a pivot at bar `i` cannot be known until bar
+    `i + right` has closed -- that's the whole point of the right-hand
+    confirmation. Indexing these lists at bar `i` while iterating a backtest
+    is reading `right` bars into the future. Use `confirmed_pivots()` instead
+    unless you have a specific reason not to; it returns the same information
+    keyed by confirmation bar, which is what a causal strategy actually needs.
+    """
+    n = len(bars)
+    is_ph = [False] * n
+    is_pl = [False] * n
+    if left < 1 or right < 1:
+        raise ValueError("left and right must both be >= 1")
+    for i in range(left, n - right):
+        h, l = bars[i].h, bars[i].l
+        if all(bars[j].h < h for j in range(i - left, i)) and \
+           all(bars[j].h < h for j in range(i + 1, i + right + 1)):
+            is_ph[i] = True
+        if all(bars[j].l > l for j in range(i - left, i)) and \
+           all(bars[j].l > l for j in range(i + 1, i + right + 1)):
+            is_pl[i] = True
+    return is_ph, is_pl
+
+
+def confirmed_pivots(bars: List[Bar], left: int = 5, right: int = 5):
+    """Same pivots, re-keyed by the bar on which they become knowable.
+
+    Returns two lists of (confirm_index, pivot_index, price). A strategy
+    iterating bar-by-bar can safely consume every entry whose
+    `confirm_index <= i` and nothing else -- which makes the causality
+    constraint structural rather than something each caller has to remember.
+    """
+    is_ph, is_pl = pivots(bars, left, right)
+    highs = [(i + right, i, bars[i].h) for i in range(len(bars)) if is_ph[i]]
+    lows = [(i + right, i, bars[i].l) for i in range(len(bars)) if is_pl[i]]
+    return highs, lows
+
+
 def normalize01(vals: List[float]) -> List[float]:
     """Running historic min-max normalize to [0, 1] (matches jdehorty's
     MLExtensions `normalize`, used for unbounded features like WT/CCI)."""

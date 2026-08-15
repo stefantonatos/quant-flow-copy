@@ -147,11 +147,21 @@ def _run_bracket(strat, bars, sl_atr, be_atr):
     fill-order guesswork rather than real edge."""
     if not hasattr(strat, "start_long") or not hasattr(strat, "start_short"):
         print(f"\n>> BRACKET skipped: {type(strat).__name__} doesn't expose "
-              f"start_long/start_short (only lorentzian does right now).")
+              f"start_long/start_short (lorentzian and sdz do).")
         return
-    print(f"\n>> BRACKET (SL {sl_atr}x ATR, TP1 1R, TP2 2R, breakeven+ {be_atr}x ATR)")
+    structural = hasattr(strat, "stops") and hasattr(strat, "targets")
+    if structural:
+        print(f"\n>> BRACKET (structural stops + targets from the strategy, "
+              f"breakeven+ {be_atr}x ATR)")
+    else:
+        print(f"\n>> BRACKET (SL {sl_atr}x ATR, TP1 1R, TP2 2R, "
+              f"breakeven+ {be_atr}x ATR)")
+    # Strategies that compute their own structural levels (sdz) pass them
+    # through; ones that don't (lorentzian) fall back to ATR-derived stops.
     pess, opt = run_both_policies(bars, strat.start_long, strat.start_short,
-                                  sl_atr=sl_atr, be_offset_atr=be_atr)
+                                  sl_atr=sl_atr, be_offset_atr=be_atr,
+                                  stops=getattr(strat, "stops", None),
+                                  targets=getattr(strat, "targets", None))
     print(pess.summary())
     print(opt.summary())
 

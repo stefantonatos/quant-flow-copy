@@ -70,6 +70,14 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
                 f"Long when close < lower band and RSI < {ov}; exit when RSI > {ob} or close > upper band.")
         return "bollrsi", params, expl
 
+    # ---- Supply/Demand + market structure (TradingLab video strategy) ----
+    if ("sdz" in t.split() or "supply" in t or "demand" in t
+            or "market structure" in t or "structure" in t.split()):
+        params = {"min_rr": 2.5, "pivot_lookback": 5, "impulse_atr": 2.0}
+        expl = ("Matched SUPPLY/DEMAND + STRUCTURE. Trade with the trend (HH/HL or "
+                "LL/LH) off demand/supply zones, only when reward:risk >= 2.5.")
+        return "sdz", params, expl
+
     # ---- Lorentzian Classification (ML / KNN) ----
     if "lorentzian" in t or "knn" in t or "k-nearest" in t or "machine learning" in t:
         params = {"neighbors": 8, "max_bars_back": 2000}

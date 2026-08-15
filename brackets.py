@@ -90,6 +90,32 @@ class BracketReport:
     def ambiguous_count(self) -> int:
         return sum(1 for t in self.trades if t.ambiguous)
 
+    @property
+    def avg_win_r(self) -> float:
+        w = [t.r_multiple for t in self.trades if t.r_multiple > 0]
+        return sum(w) / len(w) if w else 0.0
+
+    @property
+    def avg_loss_r(self) -> float:
+        """Mean loss as a positive number, in R."""
+        l = [-t.r_multiple for t in self.trades if t.r_multiple <= 0]
+        return sum(l) / len(l) if l else 0.0
+
+    @property
+    def payoff_ratio(self) -> float:
+        return (self.avg_win_r / self.avg_loss_r) if self.avg_loss_r > 0 else float("inf")
+
+    @property
+    def breakeven_win_rate(self) -> float:
+        """Derived from the REALIZED payoff, never assumed.
+
+        Hardcoding 50% only holds for a 1:1 bracket. This strategy family
+        runs 2.5R targets, where breakeven is nearer 29% -- quoting 50%
+        there would make a perfectly good system look like a losing one.
+        """
+        r = self.payoff_ratio
+        return 0.0 if r == float("inf") else 1.0 / (1.0 + r)
+
     def summary(self) -> str:
         lines = []
         lines.append("=" * 56)
@@ -97,7 +123,10 @@ class BracketReport:
         lines.append("=" * 56)
         lines.append(f"Trades            : {self.n}")
         lines.append(f"Expectancy        : {self.avg_r:+.3f} R   <-- read this first")
-        lines.append(f"Win rate          : {self.win_rate*100:.1f}%   (breakeven: 50.0%)")
+        lines.append(f"Win rate          : {self.win_rate*100:.1f}%"
+                     f"   (breakeven: {self.breakeven_win_rate*100:.1f}%)")
+        lines.append(f"Payoff ratio      : {self.payoff_ratio:.2f}"
+                     f"   (avg win {self.avg_win_r:+.2f}R / avg loss -{self.avg_loss_r:.2f}R)")
         lines.append(f"Total R           : {self.total_r:+.2f}")
         lines.append(f"Ambiguous bars    : {self.ambiguous_count}/{self.n}"
                      f"  (same-bar stop+target ties, resolved {self.policy})")
@@ -106,17 +135,32 @@ class BracketReport:
 
 
 def _build_bracket(bars: List[Bar], i: int, side: str, atr_val: float,
-                    sl_atr: float, be_offset_atr: float) -> BracketTrade:
+                    sl_atr: float, be_offset_atr: float,
+                    stop_px: Optional[float] = None,
+                    target_px: Optional[float] = None) -> BracketTrade:
+    """`stop_px` / `target_px` let a strategy supply its own structural levels
+    (e.g. a stop below a demand zone, a target at the last swing high) instead
+    of having them derived from ATR. When neither is given the behaviour is
+    exactly the original ATR bracket -- SL at sl_atr x ATR, TP1 1R, TP2 2R."""
     entry_px = bars[i].c
-    risk = sl_atr * atr_val
-    if side == "LONG":
-        stop0 = entry_px - risk
-        tp1 = entry_px + risk
-        tp2 = entry_px + 2 * risk
+
+    if stop_px is not None and stop_px == stop_px:
+        risk = abs(entry_px - stop_px)
+        stop0 = stop_px
     else:
-        stop0 = entry_px + risk
-        tp1 = entry_px - risk
-        tp2 = entry_px - 2 * risk
+        risk = sl_atr * atr_val
+        stop0 = entry_px - risk if side == "LONG" else entry_px + risk
+
+    if target_px is not None and target_px == target_px:
+        # Single structural target: TP2 is the real exit, TP1 sits at the
+        # halfway point so the partial-exit machinery still applies.
+        tp2 = target_px
+        tp1 = entry_px + (tp2 - entry_px) / 2.0
+    elif side == "LONG":
+        tp1, tp2 = entry_px + risk, entry_px + 2 * risk
+    else:
+        tp1, tp2 = entry_px - risk, entry_px - 2 * risk
+
     return BracketTrade(side=side, entry_i=i, entry_px=entry_px,
                         stop0=stop0, tp1=tp1, tp2=tp2, risk=risk)
 
@@ -208,33 +252,45 @@ def _resolve(trade: BracketTrade, bars: List[Bar], be_offset_atr: float,
 
 
 def _score(trade: BracketTrade, half_off: bool) -> None:
-    """`half_off` is the state AT EXIT TIME: True means TP1 already filled
-    (in an earlier bar) before whatever closed the trade now, so the position
-    was already half-sized. It fully determines the blend -- no need to
-    re-derive it by scanning trade.fills."""
-    last = trade.fills[-1]
-    if trade.exit_reason == "tp2":
-        trade.r_multiple = (0.5 * 1.0 + 0.5 * 2.0) if half_off else 2.0
-    elif trade.exit_reason == "stop":
-        # Use the ACTUAL fill price, not a hardcoded -1.0 -- a gapped stop
-        # can fill well past the nominal level, and that has to show up as
-        # worse than a clean 1R loss, not get rounded away.
-        r = (last.px - trade.entry_px) / trade.risk
-        r = r if trade.side == "LONG" else -r
-        trade.r_multiple = (0.5 * 1.0 + 0.5 * r) if half_off else r
-    else:  # eod, never filled -- mark-to-market on partial size
-        raw_r = (last.px - trade.entry_px) / trade.risk
-        raw_r = raw_r if trade.side == "LONG" else -raw_r
-        trade.r_multiple = (0.5 * 1.0 + 0.5 * raw_r) if half_off else raw_r
+    """Score every leg from its ACTUAL fill price.
+
+    Nothing here may assume TP1 == 1R or TP2 == 2R: with a structural target
+    (a stop below a demand zone, a target at the last swing high) those legs
+    land wherever the chart puts them. Deriving R from real fill prices also
+    handles gaps correctly for free -- a stop that gapped through fills worse
+    than -1R and has to show up that way rather than being rounded to a clean
+    1R loss.
+
+    `half_off` is the state AT EXIT TIME: True means TP1 filled on an earlier
+    bar, so only half the position remained for the final fill.
+    """
+    def r_of(px: float) -> float:
+        r = (px - trade.entry_px) / trade.risk
+        return r if trade.side == "LONG" else -r
+
+    tp1_fill = next((f for f in trade.fills if f.reason == "tp1"), None)
+    final = trade.fills[-1]
+
+    if half_off and tp1_fill is not None and final is not tp1_fill:
+        trade.r_multiple = 0.5 * r_of(tp1_fill.px) + 0.5 * r_of(final.px)
+    else:
+        trade.r_multiple = r_of(final.px)
 
 
 def run_brackets(bars: List[Bar], start_long: List[bool], start_short: List[bool],
                   atr_len: int = 14, sl_atr: float = 1.0, be_offset_atr: float = 0.15,
-                  policy: Policy = "pessimistic") -> BracketReport:
+                  policy: Policy = "pessimistic",
+                  stops: Optional[List[float]] = None,
+                  targets: Optional[List[float]] = None) -> BracketReport:
     """One bracket at a time: a signal is ignored while a trade is open,
     matching the source indicator's own single-position behaviour (it can't
     fire a fresh startLongTrade while already long, since that requires the
-    underlying `signal` to change)."""
+    underlying `signal` to change).
+
+    `stops` / `targets` are optional per-bar lists of explicit price levels,
+    parallel to start_long/start_short. Supply them for structure-based
+    strategies (SupplyDemandStructure does); omit them and stops fall back to
+    sl_atr x ATR with TP1/TP2 at 1R/2R, unchanged."""
     atr_series = atr(bars, atr_len)
     trades: List[BracketTrade] = []
     i = 0
@@ -249,7 +305,12 @@ def run_brackets(bars: List[Bar], start_long: List[bool], start_short: List[bool
         if a != a or a <= 0:  # NaN or degenerate during warmup
             i += 1
             continue
-        trade = _build_bracket(bars, i, side, a, sl_atr, be_offset_atr)
+        sp = stops[i] if (stops is not None and i < len(stops)) else None
+        tg = targets[i] if (targets is not None and i < len(targets)) else None
+        trade = _build_bracket(bars, i, side, a, sl_atr, be_offset_atr, sp, tg)
+        if trade.risk <= 0:   # degenerate structural stop at the entry price
+            i += 1
+            continue
         _resolve(trade, bars, be_offset_atr, a, policy)
         trades.append(trade)
         i = trade.exit_i + 1  # no overlapping brackets
@@ -258,12 +319,15 @@ def run_brackets(bars: List[Bar], start_long: List[bool], start_short: List[bool
 
 def run_both_policies(bars: List[Bar], start_long: List[bool], start_short: List[bool],
                        atr_len: int = 14, sl_atr: float = 1.0,
-                       be_offset_atr: float = 0.15) -> tuple[BracketReport, BracketReport]:
+                       be_offset_atr: float = 0.15,
+                       stops: Optional[List[float]] = None,
+                       targets: Optional[List[float]] = None
+                       ) -> tuple[BracketReport, BracketReport]:
     """Convenience: run pessimistic and optimistic side by side. The gap
     between them bounds how much of any headline number is fill-order
     guesswork versus real edge."""
     pess = run_brackets(bars, start_long, start_short, atr_len, sl_atr, be_offset_atr,
-                        "pessimistic")
+                        "pessimistic", stops, targets)
     opt = run_brackets(bars, start_long, start_short, atr_len, sl_atr, be_offset_atr,
-                       "optimistic")
+                       "optimistic", stops, targets)
     return pess, opt

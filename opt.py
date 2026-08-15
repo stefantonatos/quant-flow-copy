@@ -33,6 +33,8 @@ PARAM_GRIDS: Dict[str, Dict[str, list]] = {
     "orb": {"range_bars": [3, 6, 12, 24]},
     "po3": {"risk_reward": [1.0, 1.5, 2.0, 3.0], "manip_end_hour": [11, 13, 16]},
     "lorentzian": {"neighbors": [5, 8, 12], "max_bars_back": [1000, 2000]},
+    "sdz": {"min_rr": [2.0, 2.5, 3.0], "pivot_lookback": [3, 5, 8],
+            "impulse_atr": [1.5, 2.0, 3.0]},
 }
 
 

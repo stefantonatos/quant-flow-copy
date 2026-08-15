@@ -383,19 +383,26 @@ class TestBrackets(unittest.TestCase):
         self.assertEqual([f.reason for f in t.fills], ["tp1", "tp2"])
         self.assertAlmostEqual(t.r_multiple, 0.5 * 1.0 + 0.5 * 2.0, places=6)
 
-    def test_full_size_gap_through_both_targets(self):
-        """A bar that gaps open past TP2 directly, without an intervening
-        bar where only TP1 was reached, exits at full size -> a real 2.0R,
-        the one case where the flat number is correct."""
+    def test_full_size_favourable_gap_scores_at_the_actual_fill(self):
+        """A bar that gaps open past TP2 exits full size at the OPEN, not at
+        the target level -- a sell-limit at 102 with the market opening at
+        103 fills at 103 (price improvement), so the trade realises +3R.
+
+        This is the mirror of test_gap_through_stop_fills_at_open_not_at_stop.
+        Both legs score from the actual fill: crediting the adverse gap while
+        capping the favourable one at its nominal level would bias every
+        result downward.
+        """
         bars = [
             self._flat_bar(0, 100),
-            self._flat_bar(1, 100, h=100.5, l=99.5),   # entry bar, ATR=1
-            self._flat_bar(2, 103, o=103, h=103.5, l=102.5),  # opens straight past TP2 (102)
+            self._flat_bar(1, 100, h=100.5, l=99.5),   # entry bar, ATR=1, tp2=102
+            self._flat_bar(2, 103, o=103, h=103.5, l=102.5),  # opens straight past TP2
         ]
         t = self._run(bars, entry_i=1, side="LONG", atr_len=1)
         self.assertEqual(t.exit_reason, "tp2")
         self.assertEqual(len(t.fills), 1, "must be a single full-size fill, no TP1 leg")
-        self.assertAlmostEqual(t.r_multiple, 2.0, places=6)
+        self.assertEqual(t.fills[-1].px, 103.0, "must fill at the gapped open")
+        self.assertAlmostEqual(t.r_multiple, 3.0, places=6)
 
     def test_clean_stop_hit(self):
         bars = [
@@ -459,6 +466,8 @@ class TestBrackets(unittest.TestCase):
         self.assertAlmostEqual(t.r_multiple, 0.5 * 1.0 + 0.5 * 0.15, places=6)
 
     def test_short_side_mirrors_long(self):
+        """Same favourable-gap geometry as the long case, sign-flipped:
+        entry 100, tp2 98, bar opens at 97 -> fills 97 -> +3R."""
         bars = [
             self._flat_bar(0, 100),
             self._flat_bar(1, 100, h=100.5, l=99.5),   # entry, ATR=1, stop=101, tp2=98
@@ -466,7 +475,8 @@ class TestBrackets(unittest.TestCase):
         ]
         t = self._run(bars, entry_i=1, side="SHORT", atr_len=1)
         self.assertEqual(t.exit_reason, "tp2")
-        self.assertAlmostEqual(t.r_multiple, 2.0, places=6)
+        self.assertEqual(t.fills[-1].px, 97.0, "must fill at the gapped open")
+        self.assertAlmostEqual(t.r_multiple, 3.0, places=6)
 
     def test_entry_bars_own_range_cannot_fill(self):
         """A wide entry bar whose own high/low would touch TP1/stop must not
@@ -510,6 +520,142 @@ class TestBrackets(unittest.TestCase):
         start_long[2] = True  # would-be second entry while bar 1's trade is still open
         rep = run_brackets(bars, start_long, [False] * n, atr_len=1)
         self.assertEqual(len(rep.trades), 1)
+
+
+# ---------------------------------------------------------------------------
+# Swing structure primitives
+# ---------------------------------------------------------------------------
+class TestPivots(unittest.TestCase):
+
+    def test_finds_an_obvious_swing_high_and_low(self):
+        from engine import pivots
+        # A clean peak at index 3 and a clean trough at index 9.
+        highs = [10, 11, 12, 20, 12, 11, 10, 9, 8, 5, 8, 9, 10, 11]
+        bars = [Bar(t=i, o=h, h=h, l=h, c=h) for i, h in enumerate(highs)]
+        is_ph, is_pl = pivots(bars, left=3, right=3)
+        self.assertTrue(is_ph[3], "peak at index 3 should be a pivot high")
+        self.assertTrue(is_pl[9], "trough at index 9 should be a pivot low")
+        self.assertEqual(sum(is_ph), 1)
+        self.assertEqual(sum(is_pl), 1)
+
+    def test_pivot_is_not_knowable_before_its_confirmation_bar(self):
+        """THE lookahead guard. A pivot at bar i needs `right` bars after it,
+        so it cannot be acted on until bar i+right. confirmed_pivots() keys
+        by that confirmation bar precisely so a strategy can't cheat."""
+        from engine import confirmed_pivots
+        highs = [10, 11, 12, 20, 12, 11, 10, 9, 8, 5, 8, 9, 10, 11]
+        bars = [Bar(t=i, o=h, h=h, l=h, c=h) for i, h in enumerate(highs)]
+        ph, pl = confirmed_pivots(bars, left=3, right=3)
+        self.assertEqual(len(ph), 1)
+        confirm_i, pivot_i, price = ph[0]
+        self.assertEqual(pivot_i, 3)
+        self.assertEqual(confirm_i, 6, "3 right-hand bars must close first")
+        self.assertEqual(price, 20)
+        self.assertGreater(confirm_i, pivot_i, "confirmation always lags the pivot")
+
+    def test_flat_series_has_no_pivots(self):
+        from engine import pivots
+        bars = mkbars([100.0] * 20, spread=0.0)
+        is_ph, is_pl = pivots(bars, left=3, right=3)
+        self.assertEqual(sum(is_ph), 0)
+        self.assertEqual(sum(is_pl), 0)
+
+    def test_rejects_degenerate_lookback(self):
+        from engine import pivots
+        bars = mkbars([100, 101, 102], spread=0.0)
+        with self.assertRaises(ValueError):
+            pivots(bars, left=0, right=3)
+
+
+# ---------------------------------------------------------------------------
+# TradingLab supply/demand + structure strategy
+# ---------------------------------------------------------------------------
+class TestSupplyDemand(unittest.TestCase):
+
+    def test_registered_and_runs(self):
+        from strategies import REGISTRY
+        self.assertIn("sdz", REGISTRY)
+        bars = mkbars([100 + math.sin(i / 9.0) * 12 for i in range(400)], spread=0.6)
+        strat = REGISTRY["sdz"](bars=bars, params={})
+        self.assertEqual(len(strat.positions), len(bars))
+        self.assertEqual(len(strat.stops), len(bars))
+        self.assertEqual(len(strat.targets), len(bars))
+
+    def test_every_signal_carries_a_stop_and_target(self):
+        """brackets.py consumes these in parallel -- a signal bar with a NaN
+        stop would silently fall back to an ATR stop and quietly stop being
+        the strategy under test."""
+        from strategies import REGISTRY
+        bars = mkbars([100 + math.sin(i / 8.0) * 14 for i in range(600)], spread=0.7)
+        s = REGISTRY["sdz"](bars=bars, params={})
+        checked = 0
+        for i, (lo, sh) in enumerate(zip(s.start_long, s.start_short)):
+            if lo or sh:
+                self.assertEqual(s.stops[i], s.stops[i], f"NaN stop at signal bar {i}")
+                self.assertEqual(s.targets[i], s.targets[i], f"NaN target at bar {i}")
+                checked += 1
+        self.assertGreater(checked, 0, "no signals -- this test would pass vacuously")
+
+    def test_rr_filter_is_what_gates_the_trades(self):
+        """Step 3 of the video, and the rule it credits with most of the
+        edge: identical setups, only min_rr differs. A stricter threshold can
+        only ever remove trades, never add them."""
+        from strategies import REGISTRY
+        bars = mkbars([100 + math.sin(i / 8.0) * 14 for i in range(600)], spread=0.7)
+        loose = REGISTRY["sdz"](bars=bars, params={"min_rr": 1.0})
+        strict = REGISTRY["sdz"](bars=bars, params={"min_rr": 5.0})
+        n_loose = sum(loose.start_long) + sum(loose.start_short)
+        n_strict = sum(strict.start_long) + sum(strict.start_short)
+        self.assertGreater(n_loose, 0, "min_rr=1.0 should admit some setups")
+        self.assertLess(n_strict, n_loose,
+                        "raising min_rr must filter setups out, not add them")
+
+    def test_every_taken_trade_actually_meets_min_rr(self):
+        """Not just fewer trades -- the ones that survive must genuinely
+        clear the threshold, measured from the levels the strategy itself
+        emitted."""
+        from strategies import REGISTRY
+        bars = mkbars([100 + math.sin(i / 6.0) * 13 for i in range(600)], spread=0.7)
+        min_rr = 2.5
+        s = REGISTRY["sdz"](bars=bars, params={"min_rr": min_rr})
+        checked = 0
+        for i in range(len(bars)):
+            if not (s.start_long[i] or s.start_short[i]):
+                continue
+            entry, stop, tgt = bars[i].c, s.stops[i], s.targets[i]
+            if s.start_long[i]:
+                risk, reward = entry - stop, tgt - entry
+            else:
+                risk, reward = stop - entry, entry - tgt
+            self.assertGreater(risk, 0, f"non-positive risk at bar {i}")
+            self.assertGreaterEqual(reward / risk, min_rr - 1e-9,
+                                    f"bar {i} taken at R:R {reward / risk:.2f}")
+            checked += 1
+        self.assertGreater(checked, 0, "no trades to check")
+
+    def test_longs_only_in_uptrend_shorts_only_in_downtrend(self):
+        """Step 1: a monotonic uptrend makes only higher highs and higher
+        lows, so the strategy must never take a short in it."""
+        from strategies import REGISTRY
+        rising = mkbars([100 + i * 0.4 + math.sin(i / 5.0) * 2 for i in range(400)],
+                        spread=0.5)
+        s = REGISTRY["sdz"](bars=rising, params={})
+        self.assertEqual(sum(s.start_short), 0,
+                         "no shorts should fire in a persistent uptrend")
+
+    def test_structural_stops_flow_into_the_bracket_engine(self):
+        """End to end: the strategy's own stop must be the bracket's stop,
+        not an ATR-derived substitute."""
+        from strategies import REGISTRY
+        from brackets import run_brackets
+        bars = mkbars([100 + math.sin(i / 8.0) * 14 for i in range(600)], spread=0.7)
+        s = REGISTRY["sdz"](bars=bars, params={})
+        rep = run_brackets(bars, s.start_long, s.start_short,
+                           stops=s.stops, targets=s.targets)
+        self.assertGreater(rep.n, 0, "expected at least one bracket")
+        for t in rep.trades:
+            self.assertAlmostEqual(t.stop0, s.stops[t.entry_i], places=9)
+            self.assertAlmostEqual(t.tp2, s.targets[t.entry_i], places=9)
 
 
 if __name__ == "__main__":

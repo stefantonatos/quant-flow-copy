@@ -17,7 +17,7 @@ import math
 from engine import (
     Strategy, Bar, sma, ema, rsi, atr, bollinger, highest, lowest,
     macd, stochastic, vwap_rolling, supertrend, roc,
-    wavetrend, cci, adx, normalize01,
+    wavetrend, cci, adx, normalize01, pivots, confirmed_pivots,
 )
 from typing import List
 
@@ -720,6 +720,188 @@ class LorentzianClassification(Strategy):
                 "// in the repo root (jdehorty's public indicator, MPL 2.0).\n")
 
 
+class SupplyDemandStructure(Strategy):
+    """TradingLab's "The Only Trading Strategy You'll Ever Need" (2024-11-04).
+
+    Three steps, per the video:
+      1. Market structure -- uptrend = higher highs AND higher lows; downtrend
+         = lower lows AND lower highs. Trade only with the trend.
+      2. Supply/demand zone -- in an uptrend mark the demand area where price
+         consolidated before shooting up, and wait for price to return to it.
+         Mirrored for supply in downtrends.
+      3. Risk:reward -- take the trade only if R:R >= 2.5, else skip it. The
+         video credits this single filter with most of the strategy's edge.
+
+    CAVEAT ON FIDELITY. The video is not reachable from this container
+    (youtube.com and every transcript mirror are egress-blocked), so these
+    rules were reconstructed from search-index summaries, not the transcript.
+    More importantly, "where price consolidated before shooting up" is a
+    human eyeballing a chart -- it is not a rule. The impulse/base detection
+    below is *a* defensible mechanization, not *the* strategy, and results
+    will move with `impulse_atr` and `base_max_bars`. Treat any backtest of
+    this as a test of this interpretation.
+
+    Exposes start_long/start_short plus stops/targets so brackets.py can
+    execute the real structural levels rather than re-deriving from ATR.
+    """
+
+    name = "Supply/Demand + Structure"
+    description = ("Price action: trade with market structure (HH/HL or LL/LH) off "
+                    "demand/supply zones, filtered to setups offering at least "
+                    "2.5:1 reward-to-risk. Mechanization of TradingLab's video "
+                    "strategy -- zone-drawing is discretionary, see class docstring.")
+
+    def prepare(self):
+        p = self.params
+        bars, n = self.bars, len(self.bars)
+        left = right = p.get("pivot_lookback", 5)
+        impulse_atr = p.get("impulse_atr", 2.0)
+        impulse_max_bars = p.get("impulse_max_bars", 5)
+        base_max_bars = p.get("base_max_bars", 3)
+        zone_max_age = p.get("zone_max_age", 200)
+        sl_buffer_atr = p.get("sl_buffer_atr", 0.25)
+        self.min_rr = p.get("min_rr", 2.5)
+
+        a = atr(bars, p.get("atr_n", 14))
+        ph_events, pl_events = confirmed_pivots(bars, left, right)
+
+        start_long = [False] * n
+        start_short = [False] * n
+        stops: List[float] = [float("nan")] * n
+        targets: List[float] = [float("nan")] * n
+
+        # Pivot events keyed by the bar they become knowable on, so nothing
+        # below can consult a swing before its right-hand bars have closed.
+        ph_by_confirm = {}
+        pl_by_confirm = {}
+        for c, idx, px in ph_events:
+            ph_by_confirm.setdefault(c, []).append((idx, px))
+        for c, idx, px in pl_events:
+            pl_by_confirm.setdefault(c, []).append((idx, px))
+
+        swing_highs: List[tuple] = []   # (bar_index, price), confirmed only
+        swing_lows: List[tuple] = []
+        zones: List[dict] = []          # active demand/supply zones
+
+        for i in range(n):
+            for idx, px in ph_by_confirm.get(i, []):
+                swing_highs.append((idx, px))
+            for idx, px in pl_by_confirm.get(i, []):
+                swing_lows.append((idx, px))
+
+            # --- Step 1: market structure ---------------------------------
+            trend = 0
+            if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+                hh = swing_highs[-1][1] > swing_highs[-2][1]
+                hl = swing_lows[-1][1] > swing_lows[-2][1]
+                ll = swing_lows[-1][1] < swing_lows[-2][1]
+                lh = swing_highs[-1][1] < swing_highs[-2][1]
+                if hh and hl:
+                    trend = 1
+                elif ll and lh:
+                    trend = -1
+
+            # --- Step 2: find new zones off completed impulse legs --------
+            # An impulse is a fast directional move; the zone is the small
+            # base immediately preceding it. Detected on bar i looking only
+            # backwards, so it is causal.
+            av = a[i]
+            if av == av and av > 0 and i >= impulse_max_bars + base_max_bars:
+                for span in range(1, impulse_max_bars + 1):
+                    lo_i, hi_i = i - span, i
+                    move = bars[hi_i].c - bars[lo_i].o
+                    if abs(move) < impulse_atr * av:
+                        continue
+                    bstart = max(0, lo_i - base_max_bars)
+                    bbars = bars[bstart:lo_i]
+                    if not bbars:
+                        continue
+                    if move > 0:
+                        zones.append({"kind": "demand", "top": max(b.h for b in bbars),
+                                      "bot": min(b.l for b in bbars), "born": i})
+                    else:
+                        zones.append({"kind": "supply", "top": max(b.h for b in bbars),
+                                      "bot": min(b.l for b in bbars), "born": i})
+                    break
+
+            # Expire zones: aged out, or price closed clean through them.
+            zones = [z for z in zones
+                     if i - z["born"] <= zone_max_age
+                     and not (z["kind"] == "demand" and bars[i].c < z["bot"])
+                     and not (z["kind"] == "supply" and bars[i].c > z["top"])]
+
+            # --- Entry: price returns into a with-trend zone ---------------
+            if trend == 0 or av != av or av <= 0:
+                continue
+            want = "demand" if trend == 1 else "supply"
+            for z in zones:
+                if z["kind"] != want or z["born"] >= i:
+                    continue
+                touched = (bars[i].l <= z["top"] if trend == 1
+                           else bars[i].h >= z["bot"])
+                if not touched:
+                    continue
+
+                entry = bars[i].c
+                if trend == 1:
+                    stop = z["bot"] - sl_buffer_atr * av
+                    target = swing_highs[-1][1] if swing_highs else float("nan")
+                    risk, reward = entry - stop, (target - entry)
+                else:
+                    stop = z["top"] + sl_buffer_atr * av
+                    target = swing_lows[-1][1] if swing_lows else float("nan")
+                    risk, reward = stop - entry, (entry - target)
+
+                if risk <= 0 or reward != reward or reward <= 0:
+                    continue
+                # --- Step 3: the R:R filter -- the whole point of step 3 ---
+                if reward / risk < self.min_rr:
+                    continue
+
+                if trend == 1:
+                    start_long[i] = True
+                else:
+                    start_short[i] = True
+                stops[i], targets[i] = stop, target
+                zones.remove(z)
+                break
+
+        self.start_long = start_long
+        self.start_short = start_short
+        self.stops = stops
+        self.targets = targets
+
+        # Collapse into a posture series so engine.run() can consume it too.
+        # Without brackets there is no stop/target, so this holds until the
+        # opposite signal -- a strictly worse execution model than
+        # `run.py --bracket`, which is the intended way to run this.
+        positions = ["FLAT"] * n
+        pos = "FLAT"
+        for i in range(n):
+            if start_long[i]:
+                pos = "LONG"
+            elif start_short[i]:
+                pos = "SHORT"
+            positions[i] = pos
+        self.positions = positions
+
+    def decide(self, i):
+        return self.positions[i]
+
+    def to_pine(self):
+        p = self.params
+        return (f"//@version=6\n"
+                f"indicator(\"Supply/Demand + Structure (free)\", overlay=true)\n"
+                f"lb = {p.get('pivot_lookback', 5)}\n"
+                f"ph = ta.pivothigh(high, lb, lb)\n"
+                f"pl = ta.pivotlow(low, lb, lb)\n"
+                f"// Structure: uptrend = HH and HL; zones = base before an impulse leg;\n"
+                f"// entry on return to zone, stop beyond it, target = last swing,\n"
+                f"// taken only when reward/risk >= {p.get('min_rr', 2.5)}.\n"
+                f"plotshape(not na(ph), style=shape.triangledown, location=location.abovebar)\n"
+                f"plotshape(not na(pl), style=shape.triangleup, location=location.belowbar)\n")
+
+
 REGISTRY = {
     "sma": SMACrossover,
     "rsi": RSIMeanReversion,
@@ -735,6 +917,7 @@ REGISTRY = {
     "orb": OpeningRangeBreakout,
     "po3": PowerOfThree,
     "lorentzian": LorentzianClassification,
+    "sdz": SupplyDemandStructure,
 }
 
 
