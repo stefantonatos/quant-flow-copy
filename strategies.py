@@ -705,6 +705,13 @@ class LorentzianClassification(Strategy):
             positions[i] = pos
         self.positions = positions
 
+        # Exposed for brackets.py: engine.run() only sees the collapsed
+        # posture above, but a bracket backtest needs the actual entry
+        # events -- posture alone can't tell a fresh signal from a bar where
+        # the prior position simply held.
+        self.start_long = start_long
+        self.start_short = start_short
+
     def decide(self, i):
         return self.positions[i]
 

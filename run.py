@@ -21,6 +21,12 @@ Flags:
   --plot              print an ASCII equity curve
   --walkforward K     split into K contiguous out-of-sample folds
   --montecarlo N      bootstrap-resample realized trades N times
+  --bracket           also run a TP1/TP2/SL bracket backtest (needs a strategy
+                      that exposes start_long/start_short, e.g. lorentzian).
+                      Prints both pessimistic and optimistic same-bar-tie
+                      resolutions side by side -- see brackets.py.
+  --sl-atr N          bracket stop distance in ATR multiples (default 1.0)
+  --be-atr N          bracket breakeven+ offset in ATR multiples (default 0.15)
   --metric M          optimize: rank by sharpe|total_return|profit_factor (default sharpe)
   --top N             optimize: how many top candidates to show (default 5)
 
@@ -43,6 +49,7 @@ from engine import run
 from gen import generate, plan_from_text
 from strategies import REGISTRY, list_strategies
 from opt import optimize, format_results, PARAM_GRIDS
+from brackets import run_both_policies
 import data as D
 
 
@@ -133,6 +140,22 @@ def _run_montecarlo(rep, capital, sims):
     print(f"   max drawdown   P50={pct(maxdds, 0.50) * 100:.2f}%  P95={pct(maxdds, 0.95) * 100:.2f}%")
 
 
+def _run_bracket(strat, bars, sl_atr, be_atr):
+    """TP1/TP2/SL execution against high/low, not just closes -- the thing
+    engine.run() can't do. Reports both same-bar-tie resolutions side by
+    side; the gap between them is how much of any headline win rate is
+    fill-order guesswork rather than real edge."""
+    if not hasattr(strat, "start_long") or not hasattr(strat, "start_short"):
+        print(f"\n>> BRACKET skipped: {type(strat).__name__} doesn't expose "
+              f"start_long/start_short (only lorentzian does right now).")
+        return
+    print(f"\n>> BRACKET (SL {sl_atr}x ATR, TP1 1R, TP2 2R, breakeven+ {be_atr}x ATR)")
+    pess, opt = run_both_policies(bars, strat.start_long, strat.start_short,
+                                  sl_atr=sl_atr, be_offset_atr=be_atr)
+    print(pess.summary())
+    print(opt.summary())
+
+
 def main(argv):
     args = argv[1:]
     if not args or args[0] == "list":
@@ -151,6 +174,9 @@ def main(argv):
     plot = False
     walkforward = 0
     montecarlo = 0
+    bracket = False
+    sl_atr = 1.0
+    be_atr = 0.15
     metric = "sharpe"
     top_n = 5
     yahoo_range = "1y"
@@ -173,6 +199,12 @@ def main(argv):
             walkforward = int(args[i + 1]); i += 2; continue
         if a == "--montecarlo":
             montecarlo = int(args[i + 1]); i += 2; continue
+        if a == "--bracket":
+            bracket = True; i += 1; continue
+        if a == "--sl-atr":
+            sl_atr = float(args[i + 1]); i += 2; continue
+        if a == "--be-atr":
+            be_atr = float(args[i + 1]); i += 2; continue
         if a == "--metric":
             metric = args[i + 1]; i += 2; continue
         if a == "--top":
@@ -239,6 +271,8 @@ def main(argv):
         _run_walkforward(strat_cls, params, bars, capital, fee, walkforward)
     if montecarlo:
         _run_montecarlo(rep, capital, montecarlo)
+    if bracket:
+        _run_bracket(strat, bars, sl_atr, be_atr)
 
 
 if __name__ == "__main__":

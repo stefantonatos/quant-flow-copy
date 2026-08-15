@@ -333,5 +333,184 @@ class TestLorentzianParity(unittest.TestCase):
         self.assertEqual(self._pine_label(100, 100), 0, "flat labels NEUTRAL")
 
 
+# ---------------------------------------------------------------------------
+# Bracket backtester
+# ---------------------------------------------------------------------------
+class TestBrackets(unittest.TestCase):
+    """Hand-constructed geometry, known outcomes. This is the part of the
+    project that actually stands in for the vendor's on-chart stats table,
+    so its arithmetic has to be trustworthy on its own -- not just
+    plausible-looking."""
+
+    def _run(self, bars, entry_i, side, sl_atr=1.0, be_offset_atr=0.15,
+             atr_len=1, policy="pessimistic"):
+        from brackets import run_brackets
+        n = len(bars)
+        start_long = [False] * n
+        start_short = [False] * n
+        if side == "LONG":
+            start_long[entry_i] = True
+        else:
+            start_short[entry_i] = True
+        rep = run_brackets(bars, start_long, start_short, atr_len=atr_len,
+                           sl_atr=sl_atr, be_offset_atr=be_offset_atr, policy=policy)
+        self.assertEqual(len(rep.trades), 1, "expected exactly one bracket")
+        return rep.trades[0]
+
+    @staticmethod
+    def _flat_bar(t, px, h=None, l=None, o=None):
+        """A bar with an explicit range, decoupled from mkbars' o==c
+        convention -- needed here because that convention makes every bar's
+        open equal to its own close, which silently triggers this module's
+        gap-fill path in tests that mean to exercise the intrabar path."""
+        return Bar(t=t, o=px if o is None else o, h=px if h is None else h,
+                  l=px if l is None else l, c=px)
+
+    def test_clean_tp1_then_tp2_blended(self):
+        """Long at 100, ATR=1 (bar 1's own h/l spread of +-0.5 sets it) ->
+        stop 99, TP1 101, TP2 102. TP1 fills on bar 2 (half off, stop walks
+        to breakeven+), TP2 fills on bar 3. This is the two-leg path, so the
+        correct blend is 0.5*1R + 0.5*2R = 1.5R -- NOT a flat 2.0R, which
+        would only be right if the position never partial-exited at TP1."""
+        bars = [
+            self._flat_bar(0, 100),
+            self._flat_bar(1, 100, h=100.5, l=99.5),   # entry bar: sets ATR=1.0
+            self._flat_bar(2, 100.5, h=101.2, l=100),  # touches TP1 (101) intrabar
+            self._flat_bar(3, 101.5, h=102.2, l=101),  # touches TP2 (102) intrabar
+        ]
+        t = self._run(bars, entry_i=1, side="LONG", atr_len=1)
+        self.assertEqual(t.exit_reason, "tp2")
+        self.assertEqual([f.reason for f in t.fills], ["tp1", "tp2"])
+        self.assertAlmostEqual(t.r_multiple, 0.5 * 1.0 + 0.5 * 2.0, places=6)
+
+    def test_full_size_gap_through_both_targets(self):
+        """A bar that gaps open past TP2 directly, without an intervening
+        bar where only TP1 was reached, exits at full size -> a real 2.0R,
+        the one case where the flat number is correct."""
+        bars = [
+            self._flat_bar(0, 100),
+            self._flat_bar(1, 100, h=100.5, l=99.5),   # entry bar, ATR=1
+            self._flat_bar(2, 103, o=103, h=103.5, l=102.5),  # opens straight past TP2 (102)
+        ]
+        t = self._run(bars, entry_i=1, side="LONG", atr_len=1)
+        self.assertEqual(t.exit_reason, "tp2")
+        self.assertEqual(len(t.fills), 1, "must be a single full-size fill, no TP1 leg")
+        self.assertAlmostEqual(t.r_multiple, 2.0, places=6)
+
+    def test_clean_stop_hit(self):
+        bars = [
+            self._flat_bar(0, 100),
+            self._flat_bar(1, 100, h=100.5, l=99.5),        # entry bar, ATR=1, stop=99
+            self._flat_bar(2, 99, o=99.5, h=99.5, l=98.5),  # opens above stop, dips through intrabar
+        ]
+        t = self._run(bars, entry_i=1, side="LONG", atr_len=1)
+        self.assertEqual(t.exit_reason, "stop")
+        self.assertAlmostEqual(t.r_multiple, -1.0, places=6)
+
+    def test_gap_through_stop_fills_at_open_not_at_stop(self):
+        """A gap-down open below the stop must fill at the worse open price,
+        not at the stop level -- filling at the level is free money that
+        never existed."""
+        bars = [
+            self._flat_bar(0, 100),
+            self._flat_bar(1, 100, h=100.5, l=99.5),   # entry bar, ATR=1, stop=99
+            self._flat_bar(2, 94.5, o=95.0, h=95.0, l=94.0),  # opens well below stop
+        ]
+        t = self._run(bars, entry_i=1, side="LONG", atr_len=1)
+        self.assertEqual(t.exit_reason, "stop")
+        self.assertEqual(t.fills[-1].px, 95.0, "must fill at the gapped open")
+        self.assertLess(t.r_multiple, -1.0, "worse than a clean 1R stop")
+
+    def test_same_bar_ambiguity_resolved_by_policy(self):
+        """One bar's range covers both TP1 and the stop. Pessimistic must
+        take the stop; optimistic must take the target. The two policies
+        must disagree on this exact bar -- that disagreement is the whole
+        point of reporting both."""
+        bars = [
+            self._flat_bar(0, 100),
+            self._flat_bar(1, 100, h=100.5, l=99.5),           # entry, ATR=1, stop=99, tp1=101
+            self._flat_bar(2, 100.5, o=100, h=101.5, l=98.5),  # both touched intrabar
+        ]
+        pess = self._run(bars, entry_i=1, side="LONG", atr_len=1, policy="pessimistic")
+        opt = self._run(bars, entry_i=1, side="LONG", atr_len=1, policy="optimistic")
+        self.assertTrue(pess.ambiguous)
+        self.assertTrue(opt.ambiguous)
+        self.assertEqual(pess.exit_reason, "stop")
+        # TP1 is a partial exit, not a terminal state -- with no bar left
+        # afterwards the trade's overall exit_reason ends up "eod". What
+        # matters here is which side WON the tie on the ambiguous bar itself.
+        self.assertEqual(opt.fills[0].reason, "tp1")
+        self.assertLess(pess.r_multiple, opt.r_multiple)
+
+    def test_tp1_then_stopped_at_breakeven(self):
+        """TP1 fills (half off, stop walks to breakeven+), then price falls
+        back and takes the breakeven stop on the remaining half."""
+        bars = [
+            self._flat_bar(0, 100),
+            self._flat_bar(1, 100, h=100.5, l=99.5),          # entry, ATR=1, stop=99, tp1=101
+            self._flat_bar(2, 101, o=100.5, h=101.5, l=100.5),  # TP1 fills, be=100.15
+            self._flat_bar(3, 100.15, o=100.3, h=100.3, l=100.0),  # dips through be intrabar
+        ]
+        t = self._run(bars, entry_i=1, side="LONG", atr_len=1, be_offset_atr=0.15)
+        self.assertEqual(t.exit_reason, "stop")
+        self.assertEqual(len(t.fills), 2)
+        self.assertEqual(t.fills[0].reason, "tp1")
+        # half at +1R, half at the breakeven+ offset (+0.15R) -> 0.575R net
+        self.assertAlmostEqual(t.r_multiple, 0.5 * 1.0 + 0.5 * 0.15, places=6)
+
+    def test_short_side_mirrors_long(self):
+        bars = [
+            self._flat_bar(0, 100),
+            self._flat_bar(1, 100, h=100.5, l=99.5),   # entry, ATR=1, stop=101, tp2=98
+            self._flat_bar(2, 97, o=97, h=97.5, l=96.5),  # opens straight past TP2
+        ]
+        t = self._run(bars, entry_i=1, side="SHORT", atr_len=1)
+        self.assertEqual(t.exit_reason, "tp2")
+        self.assertAlmostEqual(t.r_multiple, 2.0, places=6)
+
+    def test_entry_bars_own_range_cannot_fill(self):
+        """A wide entry bar whose own high/low would touch TP1/stop must not
+        fill on that bar -- entry executes at its close, and only bars
+        strictly after it are eligible. Filling on the entry bar is lookahead."""
+        bars = [
+            self._flat_bar(0, 100),
+            self._flat_bar(1, 100, h=105, l=95),   # entry bar: huge range, closes flat
+            self._flat_bar(2, 100, h=100.5, l=99.5),  # nothing happens after
+        ]
+        t = self._run(bars, entry_i=1, side="LONG", atr_len=1)
+        self.assertEqual(t.exit_reason, "eod", "no fill should occur before bar 2")
+
+    def test_optimistic_at_least_as_good_as_pessimistic_in_aggregate(self):
+        import random
+        random.seed(11)
+        closes = [100.0]
+        for _ in range(200):
+            closes.append(max(1.0, closes[-1] + random.gauss(0, 1.2)))
+        bars = mkbars(closes, spread=0.8)
+        n = len(bars)
+        start_long = [False] * n
+        start_short = [False] * n
+        for i in range(5, n - 10, 15):
+            start_long[i] = True
+        from brackets import run_brackets
+        pess = run_brackets(bars, start_long, start_short, atr_len=5)
+        opt = run_brackets(bars, start_long, start_short, atr_len=5, policy="optimistic")
+        self.assertGreaterEqual(opt.total_r, pess.total_r,
+                                "optimistic fills can never score worse in aggregate")
+
+    def test_no_overlapping_brackets(self):
+        """A second entry signal while a bracket is already open must be
+        ignored -- the source indicator can't fire a fresh entry without the
+        underlying signal changing, which implies the prior position closed."""
+        from brackets import run_brackets
+        bars = mkbars([100, 100, 100, 100, 100, 100], spread=0.5)
+        n = len(bars)
+        start_long = [False] * n
+        start_long[1] = True
+        start_long[2] = True  # would-be second entry while bar 1's trade is still open
+        rep = run_brackets(bars, start_long, [False] * n, atr_len=1)
+        self.assertEqual(len(rep.trades), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
