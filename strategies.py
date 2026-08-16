@@ -1023,20 +1023,34 @@ class NoWickRetrace(Strategy):
 
             # --- Trend ------------------------------------------------------
             trend = 0
+            ema_trend = 0
+            ev = e[i]
+            if ev == ev:
+                ema_trend = 1 if bars[i].c > ev else (-1 if bars[i].c < ev else 0)
+
+            struct_trend = 0
+            if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+                hh = swing_highs[-1][1] > swing_highs[-2][1]
+                hl = swing_lows[-1][1] > swing_lows[-2][1]
+                ll = swing_lows[-1][1] < swing_lows[-2][1]
+                lh = swing_highs[-1][1] < swing_highs[-2][1]
+                if hh and hl:
+                    struct_trend = 1
+                elif ll and lh:
+                    struct_trend = -1
+
             if trend_mode == "ema":
-                ev = e[i]
-                if ev == ev:
-                    trend = 1 if bars[i].c > ev else (-1 if bars[i].c < ev else 0)
+                trend = ema_trend
+            elif trend_mode == "both":
+                # Structure is a LOCAL read -- on 15m with a 5-bar pivot it
+                # sees about an hour, so an ordinary pullback inside a strong
+                # uptrend prints a lower low and lower high and flips bearish.
+                # That is how "structure" ends up shorting a market that is
+                # plainly rising. Requiring the EMA to agree suppresses those
+                # rather than trading them, at the cost of far fewer setups.
+                trend = struct_trend if struct_trend == ema_trend else 0
             else:
-                if len(swing_highs) >= 2 and len(swing_lows) >= 2:
-                    hh = swing_highs[-1][1] > swing_highs[-2][1]
-                    hl = swing_lows[-1][1] > swing_lows[-2][1]
-                    ll = swing_lows[-1][1] < swing_lows[-2][1]
-                    lh = swing_highs[-1][1] < swing_highs[-2][1]
-                    if hh and hl:
-                        trend = 1
-                    elif ll and lh:
-                        trend = -1
+                trend = struct_trend
             trends[i] = trend
 
             av = a[i]

@@ -39,7 +39,7 @@ PARAM_GRIDS: Dict[str, Dict[str, list]] = {
     # wick_tol_frac matters most on forex, where an exactly-zero wick is rare
     # -- see the timeframe warning in NoWickRetrace's docstring.
     "nowick": {"rr": [1.0, 1.5, 2.0], "stop_buffer_atr": [0.25, 0.5, 1.0],
-               "trend_mode": ["structure", "ema"], "stop_mode": ["candle", "structure"],
+               "trend_mode": ["structure", "ema", "both"], "stop_mode": ["candle", "structure"],
                "wick_tol_frac": [0.0, 0.05]},
 }
 

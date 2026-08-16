@@ -86,8 +86,8 @@ wickTol     = input.float(0.0, "Wick Tolerance (absolute price)", minval=0, step
 wickTolFrac = input.float(0.0, "Wick Tolerance (fraction of bar range)", minval=0, maxval=0.5, step=0.01, group=grpDetect,
      tooltip="Scales with volatility, so it transfers across instruments the way an absolute price cannot. Try 0.05 on 5-decimal FX if nothing is being marked.")
 
-trendMode = input.string("structure", "Trend Definition", options=["structure", "ema"], group=grpTrend,
-     tooltip="structure = higher highs AND higher lows (or lower lows AND lower highs). ema = price above/below the EMA. He never defines it, so both are here.")
+trendMode = input.string("structure", "Trend Definition", options=["structure", "ema", "both"], group=grpTrend,
+     tooltip="structure = higher highs AND higher lows (or lower lows AND lower highs), which is a LOCAL read: a normal pullback in a strong uptrend flips it bearish. ema = price above/below the EMA, closer to how the trend looks by eye. both = they must agree, which stops counter-trend entries at the cost of far fewer trades.")
 pivotLookback = input.int(5, "Pivot Lookback (structure mode)", minval=1, group=grpTrend,
      tooltip="Bars either side of a swing. A pivot is only confirmed this many bars after it forms -- that lag is what keeps this honest.")
 emaLen = input.int(50, "EMA Length (ema mode)", minval=1, group=grpTrend)
@@ -148,7 +148,19 @@ lh = not na(lastPH) and not na(prevPH) and lastPH < prevPH
 
 structTrend = hh and hl ? 1 : ll and lh ? -1 : 0
 emaTrend    = na(emaVal) ? 0 : close > emaVal ? 1 : close < emaVal ? -1 : 0
-trend       = trendMode == "ema" ? emaTrend : structTrend
+
+// "structure" is deliberately local: with a 5-bar pivot on a 15m chart it is
+// reading roughly the last hour, so an ordinary pullback inside a strong
+// uptrend prints a lower low and a lower high and it flips bearish -- which
+// is how this ends up shorting a market that is obviously rising to the eye.
+// That is a property of the definition, not a defect in the detection.
+//
+// "both" requires structure and the EMA to agree, so a pullback that has not
+// broken the bigger trend produces no trade at all rather than a
+// counter-trend one. Strictly fewer trades; that is the intended trade-off.
+trend = trendMode == "ema" ? emaTrend :
+        trendMode == "both" ? (structTrend == emaTrend ? structTrend : 0) :
+        structTrend
 
 // ==============================
 // ==== Wickless detection ======

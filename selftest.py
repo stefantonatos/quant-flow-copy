@@ -808,14 +808,62 @@ class TestNoWick(unittest.TestCase):
                 self.assertFalse(s.start_long[i],
                                  f"bar {i} both marked and entered on itself")
 
-    def test_both_trend_modes_reach_the_same_entry(self):
+    def test_all_trend_modes_reach_the_same_entry(self):
         from strategies import NoWickRetrace
         bars, P = self._setup(retrace_offset=-0.01)
-        for mode in ("structure", "ema"):
+        for mode in ("structure", "ema", "both"):
             with self.subTest(trend_mode=mode):
                 s = NoWickRetrace(bars=bars, params={"trend_mode": mode})
                 self.assertEqual(sum(s.start_long), 1)
                 self.assertAlmostEqual(s.entries[s.start_long.index(True)], P, places=9)
+
+    @staticmethod
+    def _rally_then_pullback():
+        """A market that is plainly rising, containing one pullback deep
+        enough to undercut the prior swing low.
+
+        This is the exact shape Stefan reported from the live 15m chart: to
+        the eye it is an uptrend, but a 5-bar pivot reads only about an hour,
+        so the pullback prints a lower low AND a lower high and `structure`
+        calls it a downtrend -- and the strategy shorts a rising market.
+        """
+        pts = [100, 150, 200, 250, 300, 280, 295, 262, 288, 330, 380]
+        closes = []
+        for a, b in zip(pts, pts[1:]):
+            for j in range(8):
+                closes.append(a + (b - a) * (j + 1) / 8)
+        return [_plain(i, c) for i, c in enumerate(closes)]
+
+    def test_both_mode_suppresses_a_pullback_that_only_structure_calls_bearish(self):
+        """The reported bug, and the fix for it."""
+        from strategies import NoWickRetrace
+        bars = self._rally_then_pullback()
+        st = NoWickRetrace(bars=bars, params={"trend_mode": "structure"})
+        em = NoWickRetrace(bars=bars, params={"trend_mode": "ema"})
+        bo = NoWickRetrace(bars=bars, params={"trend_mode": "both"})
+        self.assertGreater(st.trends.count(-1), 0,
+                           "fixture must actually make structure read bearish, "
+                           "or this test proves nothing")
+        self.assertEqual(em.trends.count(-1), 0,
+                         "price never goes below the EMA here -- by that "
+                         "definition it is an uptrend throughout")
+        self.assertEqual(bo.trends.count(-1), 0,
+                         "'both' must not call a downtrend while price is "
+                         "still above the EMA")
+
+    def test_both_mode_is_never_looser_than_either_alone(self):
+        """`both` is an AND of two gates, so wherever it is in-trend, each
+        gate must independently agree. That is what makes it strictly safer
+        rather than just different."""
+        from strategies import NoWickRetrace
+        bars = self._rally_then_pullback()
+        st = NoWickRetrace(bars=bars, params={"trend_mode": "structure"})
+        em = NoWickRetrace(bars=bars, params={"trend_mode": "ema"})
+        bo = NoWickRetrace(bars=bars, params={"trend_mode": "both"})
+        for i in range(len(bars)):
+            if bo.trends[i] != 0:
+                self.assertEqual(bo.trends[i], st.trends[i])
+                self.assertEqual(bo.trends[i], em.trends[i])
 
     # --- levels ------------------------------------------------------------
     def test_rr_1_means_target_distance_equals_risk_distance(self):
