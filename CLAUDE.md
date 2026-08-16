@@ -5,7 +5,7 @@ ends.** Add what was learned, what changed, what broke. Correct anything here th
 out to be wrong — and say plainly that it was wrong, don't quietly delete it. The user
 should never have to re-explain this project from scratch.
 
-Last updated: 2026-08-11 (third session — post-merge, fixed a sign-inverted training label).
+Last updated: 2026-08-16 (bracket backtester, two new strategies, bracket-aware optimizer).
 
 ---
 
@@ -58,6 +58,71 @@ network without checking which environment you're actually in.
 **Still true and unchanged by this merge:** everything below about the Pine deliverable,
 the paid-version findings, the compile status, and the open/next items. This section is
 additive, not a correction to the Pine-side work.
+
+## Update (2026-08-16): brackets.py, two strategies from videos, bracket-aware optimize
+
+Stefan closed the Pine-parity thread himself ("good enough, move on") and moved to
+backtesting. Don't reopen the Pine signal-matching work without a new reason — the full
+settings diff came back identical on every input and the residual gap was attributed to
+`normalize_windowed()`, our own reimplementation of code nobody has ever seen.
+
+**`brackets.py` is new and is now the main execution path for anything with a stop.**
+`engine.run()` is close/flat/short only — no stop, target, or intrabar concept — so it
+cannot score any strategy whose edge lives in its trade geometry. `brackets.py` walks
+high/low bar by bar and always reports **two** numbers side by side: `pessimistic` (the
+stop wins same-bar ties) and `optimistic` (the target wins). **Always report both.** The
+gap between them is how much of a headline number is fill-order guesswork. A backtest
+quoting only the optimistic figure is the exact trick that manufactures a 72% win rate.
+
+Key invariants in there, all test-locked — don't "simplify" any of them away:
+- Gaps fill at the bar's **open**, not at the level.
+- `_score()` derives R from **actual fill prices**; nothing may assume TP1 == 1R.
+- `allow_entry_bar_fill` defaults **False**. Filling on the entry bar is lookahead when
+  entry is that bar's close. It is correct only for a limit fill mid-bar, which is why
+  `nowick` opts in and nothing else does.
+- `partial_at_tp1` defaults **True** (half off at TP1, stop to breakeven+). `nowick` sets
+  it False because a fake scale-out scores a win as 0.75R against a 1R loss and quietly
+  moves breakeven from 50% to 57%.
+
+**Two strategies built from videos Stefan sent.** Both mechanize a discretionary
+description, so both are *a* reading, not *the* strategy — say so when reporting results:
+- `sdz` — TradingLab's "Only Trading Strategy You'll Ever Need". Structure (HH/HL) +
+  supply/demand zone + a **2.5:1 R:R filter**. Rules were reconstructed from search-index
+  summaries; YouTube and every transcript mirror are egress-blocked here.
+- `nowick` — @bardfx's "No Wick". Mark a with-trend candle missing its trend-side wick,
+  wait for price to retrace to that flat edge, enter **there** (resting limit, not the
+  close), 1:1 target. Indicator identified as **xGhozt Wickless Candles**; wickless is
+  exact equality, no tolerance to guess.
+  **Stefan runs this on 15-minute FOREX.** That matters: on 5-decimal FX an exactly-zero
+  wick is much rarer than on tick-sized futures, so the strict default may yield almost no
+  setups — `wick_tol_frac` (wick as a fraction of the bar's range) is the knob for that.
+  Also note entry is AT the candle's low, so `stop_buffer_atr` **is** the entire risk and
+  sets the whole trade geometry. Too tight and the entry bar straddles both stop and
+  target; that shows up honestly as a 100% ambiguous bracket. Default raised 0.10 → 0.50.
+
+**`engine.py` gained `pivots()` / `confirmed_pivots()`.** Use `confirmed_pivots()` — it
+re-keys each swing by the bar it becomes *knowable* on (`i + right`), so a strategy cannot
+consult a pivot before its right-hand bars have closed. `pivots()` alone is a lookahead
+trap and its docstring says so.
+
+**`run.py optimize` is now bracket-aware, and this was a real bug.** For `sdz`/`nowick`
+every grid parameter (`rr`, `stop_buffer_atr`, `stop_mode`, `min_rr`) only moves
+stops/targets/entries — all invisible to `engine.run()`. Scored through it, the optimizer
+printed a ranked table in which **every row had the same number**, which reads like a
+result and is the optimizer measuring nothing. `opt.is_bracket_strategy()` now routes
+those two through `optimize_brackets()`, ranked by expectancy in R. If you add another
+bracket strategy, add it to that predicate.
+
+**Test counts: `selftest.py` 66, `test_engine.py` 13.** Two regression anchors worth
+knowing, because they prove the new defaults didn't leak: `lorentzian --bracket` must stay
+**−0.183 R over 23 trades** and `sdz --bracket` **+0.226 R over 15 trades** on sample data.
+
+**Still nothing validated.** Every number above is synthetic random-walk sample data
+(`data.py`), which has no market structure — smoke tests that the pipeline runs, not
+measurements of edge. Both new strategies fire only a handful of trades on it. The real
+blocker is unchanged: **no market-data egress from this container**, so Stefan has to
+export the data himself. He now needs **15-minute forex** for `nowick` in addition to the
+MNQ 1-minute for the Lorentzian work.
 
 ## Update: MT5 port added (2026-08-13)
 

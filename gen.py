@@ -70,6 +70,16 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
                 f"Long when close < lower band and RSI < {ov}; exit when RSI > {ob} or close > upper band.")
         return "bollrsi", params, expl
 
+    # ---- No Wick retrace (@bardfx) -- before the generic "structure" match ----
+    if "no wick" in t or "nowick" in t or "wickless" in t or "no-wick" in t:
+        params = {"rr": 1.0, "trend_mode": "structure", "stop_mode": "candle",
+                  "stop_buffer_atr": 0.50}
+        expl = ("Matched NO WICK RETRACE. Mark a with-trend candle missing its "
+                "trend-side wick, wait for price to retrace to that flat edge, "
+                "enter there with a 1:1 target. Run with --bracket; entry is a "
+                "resting limit at the level, not the bar's close.")
+        return "nowick", params, expl
+
     # ---- Supply/Demand + market structure (TradingLab video strategy) ----
     if ("sdz" in t.split() or "supply" in t or "demand" in t
             or "market structure" in t or "structure" in t.split()):

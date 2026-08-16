@@ -48,7 +48,8 @@ sys.path.insert(0, HERE)
 from engine import run
 from gen import generate, plan_from_text
 from strategies import REGISTRY, list_strategies
-from opt import optimize, format_results, PARAM_GRIDS
+from opt import (optimize, format_results, PARAM_GRIDS,
+                 is_bracket_strategy, optimize_brackets, format_bracket_results)
 from brackets import run_both_policies
 import data as D
 
@@ -150,18 +151,26 @@ def _run_bracket(strat, bars, sl_atr, be_atr):
               f"start_long/start_short (lorentzian and sdz do).")
         return
     structural = hasattr(strat, "stops") and hasattr(strat, "targets")
+    limit_entry = getattr(strat, "entries", None) is not None
     if structural:
         print(f"\n>> BRACKET (structural stops + targets from the strategy, "
-              f"breakeven+ {be_atr}x ATR)")
+              f"breakeven+ {be_atr}x ATR"
+              f"{', limit entries at the marked level' if limit_entry else ''})")
     else:
         print(f"\n>> BRACKET (SL {sl_atr}x ATR, TP1 1R, TP2 2R, "
               f"breakeven+ {be_atr}x ATR)")
-    # Strategies that compute their own structural levels (sdz) pass them
-    # through; ones that don't (lorentzian) fall back to ATR-derived stops.
+    # Strategies that compute their own structural levels (sdz, nowick) pass
+    # them through; ones that don't (lorentzian) fall back to ATR-derived
+    # stops. `entries` + allow_entry_bar_fill only apply to limit-entry
+    # strategies -- see brackets._resolve on why that switch is not free.
     pess, opt = run_both_policies(bars, strat.start_long, strat.start_short,
                                   sl_atr=sl_atr, be_offset_atr=be_atr,
                                   stops=getattr(strat, "stops", None),
-                                  targets=getattr(strat, "targets", None))
+                                  targets=getattr(strat, "targets", None),
+                                  entries=getattr(strat, "entries", None),
+                                  allow_entry_bar_fill=getattr(
+                                      strat, "allow_entry_bar_fill", False),
+                                  partial_at_tp1=getattr(strat, "partial_at_tp1", True))
     print(pess.summary())
     print(opt.summary())
 
@@ -267,8 +276,15 @@ def main(argv):
         return
 
     if optimize_mode:
-        results = optimize(strat_key, bars, capital, fee, metric=metric, top_n=top_n)
-        print(format_results(strat_key, results, metric))
+        # Bracket strategies must be scored through the bracket engine: their
+        # params only move stops/targets/entries, which engine.run() cannot
+        # see, so ranking them by Sharpe would rank identical numbers.
+        if is_bracket_strategy(strat_key):
+            print(format_bracket_results(
+                strat_key, optimize_brackets(strat_key, bars, top_n=top_n)))
+        else:
+            results = optimize(strat_key, bars, capital, fee, metric=metric, top_n=top_n)
+            print(format_results(strat_key, results, metric))
         return
 
     strat = strat_cls(bars=bars, params=params)

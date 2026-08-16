@@ -902,6 +902,241 @@ class SupplyDemandStructure(Strategy):
                 f"plotshape(not na(pl), style=shape.triangleup, location=location.belowbar)\n")
 
 
+class NoWickRetrace(Strategy):
+    """@bardfx's "No Wick" strategy.
+
+    Three rules, as he describes them:
+      1. Mark a wickless candle WITH THE TREND -- a bullish candle with no
+         bottom wick in an uptrend, a bearish candle with no top wick in a
+         downtrend.
+      2. Wait for price to retrace back to that candle.
+      3. Enter with the trend, stop beyond structure, target roughly 1:1.
+
+    "Wickless" is exact equality, not a judgement call: the indicator he uses
+    (xGhozt Wickless Candles) marks a bar where low == min(open, close) or
+    high == max(open, close). `wick_tol` (absolute price) defaults to 0.0 to
+    match that exactly.
+
+    TIMEFRAME/INSTRUMENT WARNING. Stefan is running this on 15-minute FOREX.
+    Exact equality is a much stronger condition there than on a tick-sized
+    future: EURUSD quotes to 5 decimals, so a 15m bar closing with a
+    *precisely* zero wick is rare, and `wick_tol=0.0` may yield almost no
+    setups. `wick_tol_frac` is the knob for that -- a wick counted as absent
+    when it is <= that fraction of the bar's own range, which scales across
+    instruments the way an absolute price tolerance cannot. It defaults to
+    0.0 (strict) so nothing is loosened silently; raise it and re-measure,
+    because loosening the definition is loosening the strategy, and the
+    signal count will move a long way with it.
+
+    The premise is at least internally coherent -- the wickless indicator's
+    own author argues a missing wick tends to get filled later, and "price
+    retraces to the candle" IS that wick forming. But note what follows:
+    the entry level is one price has already demonstrated it returns to, so a
+    high fill rate is built into the setup and says nothing about what happens
+    after the fill.
+
+    Two things in the description are not rules and had to be decided:
+      - "the trend" -- built both ways, `trend_mode` selects swing structure
+        (HH/HL, shared with SupplyDemandStructure) or a close-vs-EMA test.
+      - "some breathing room" below the candle -- `stop_buffer_atr`.
+
+    Be clear about what that second one does, because it is not a detail.
+    Entry is AT the flat edge, which for a bullish candle is its low. So a
+    stop "below the candle" is a stop below the entry by the buffer and
+    nothing else: the buffer IS the risk, and since the target is rr x risk,
+    it sets the whole trade's geometry. Too tight and the entry bar's own
+    range straddles both the stop and the target, which shows up honestly
+    here as a 100% ambiguous bracket -- the pessimistic and optimistic
+    policies then disagree by 2R on every single trade, and neither number
+    means anything. The 0.5 ATR default is a sane starting point, not a
+    finding; it is in the opt.py grid because it has to be measured.
+
+    Exposes start_long/start_short/entries/stops/targets. Entry is a RESTING
+    LIMIT at the candle's flat edge, not the signal bar's close, so this must
+    be run through `run.py --bracket` to mean anything.
+    """
+
+    name = "No Wick Retrace"
+    description = ("Mark a with-trend candle that has no wick on its trend side, "
+                    "wait for price to retrace to that flat edge, enter there with "
+                    "a stop beyond it and a 1:1 target. Mechanization of @bardfx's "
+                    "'no wick' setup -- see class docstring on what was decided.")
+
+    def prepare(self):
+        p = self.params
+        bars, n = self.bars, len(self.bars)
+        tol = p.get("wick_tol", 0.0)
+        tol_frac = p.get("wick_tol_frac", 0.0)
+        trend_mode = p.get("trend_mode", "structure")
+        ema_len = p.get("ema_len", 50)
+        lb = p.get("pivot_lookback", 5)
+        stop_mode = p.get("stop_mode", "candle")
+        buf = p.get("stop_buffer_atr", 0.50)
+        rr = p.get("rr", 1.0)
+        zone_max_age = p.get("zone_max_age", 100)
+
+        a = atr(bars, p.get("atr_n", 14))
+        e = ema(self.closes, ema_len)
+        ph_events, pl_events = confirmed_pivots(bars, lb, lb)
+
+        start_long = [False] * n
+        start_short = [False] * n
+        entries: List[float] = [float("nan")] * n
+        stops: List[float] = [float("nan")] * n
+        targets: List[float] = [float("nan")] * n
+
+        ph_by_confirm, pl_by_confirm = {}, {}
+        for c, idx, px in ph_events:
+            ph_by_confirm.setdefault(c, []).append((idx, px))
+        for c, idx, px in pl_events:
+            pl_by_confirm.setdefault(c, []).append((idx, px))
+
+        swing_highs: List[tuple] = []
+        swing_lows: List[tuple] = []
+        marks: List[dict] = []   # unfilled wickless levels waiting for a retrace
+        trends = [0] * n
+
+        # Detection is a property of the bar alone, so precompute it. A
+        # bullish candle with a flat bottom (low == open) is the long setup;
+        # a bearish candle with a flat top (high == open) is the short one.
+        # A fully wickless bullish candle has a flat bottom too, so it counts.
+        is_bull_mark = [False] * n
+        is_bear_mark = [False] * n
+        for i, b in enumerate(bars):
+            # Effective tolerance: the looser of the absolute and the
+            # range-relative one, so either knob alone does the job.
+            lim = max(tol, tol_frac * (b.h - b.l))
+            if b.c > b.o and b.o - b.l <= lim:
+                is_bull_mark[i] = True
+            elif b.c < b.o and b.h - b.o <= lim:
+                is_bear_mark[i] = True
+        # Exposed so a test can separate "the candle wasn't detected" from
+        # "the trend gate rejected it" -- two very different failures.
+        self.debug_bull_marks = is_bull_mark
+        self.debug_bear_marks = is_bear_mark
+
+        for i in range(n):
+            for idx, px in ph_by_confirm.get(i, []):
+                swing_highs.append((idx, px))
+            for idx, px in pl_by_confirm.get(i, []):
+                swing_lows.append((idx, px))
+
+            # --- Trend ------------------------------------------------------
+            trend = 0
+            if trend_mode == "ema":
+                ev = e[i]
+                if ev == ev:
+                    trend = 1 if bars[i].c > ev else (-1 if bars[i].c < ev else 0)
+            else:
+                if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+                    hh = swing_highs[-1][1] > swing_highs[-2][1]
+                    hl = swing_lows[-1][1] > swing_lows[-2][1]
+                    ll = swing_lows[-1][1] < swing_lows[-2][1]
+                    lh = swing_highs[-1][1] < swing_highs[-2][1]
+                    if hh and hl:
+                        trend = 1
+                    elif ll and lh:
+                        trend = -1
+            trends[i] = trend
+
+            av = a[i]
+
+            # --- Step 2: has price retraced into an existing mark? ----------
+            # Checked BEFORE this bar can create a new mark, so a candle can
+            # never trigger its own level on the bar that printed it.
+            if trend != 0 and av == av and av > 0:
+                for m in marks:
+                    if m["dir"] != trend:
+                        continue
+                    # The retrace must reach the flat edge itself -- the low
+                    # for a bullish candle, the high for a bearish one. Wicking
+                    # into the body is not a fill; that level is the whole point.
+                    level = m["level"]
+                    touched = (bars[i].l <= level if trend == 1
+                               else bars[i].h >= level)
+                    if not touched:
+                        continue
+
+                    entry = level
+                    if trend == 1:
+                        base = (m["level"] if stop_mode == "candle"
+                                else (swing_lows[-1][1] if swing_lows else m["level"]))
+                        stop = min(base, m["level"]) - buf * av
+                        risk = entry - stop
+                        target = entry + rr * risk
+                    else:
+                        base = (m["level"] if stop_mode == "candle"
+                                else (swing_highs[-1][1] if swing_highs else m["level"]))
+                        stop = max(base, m["level"]) + buf * av
+                        risk = stop - entry
+                        target = entry - rr * risk
+                    if risk <= 0:
+                        continue
+
+                    if trend == 1:
+                        start_long[i] = True
+                    else:
+                        start_short[i] = True
+                    entries[i], stops[i], targets[i] = entry, stop, target
+                    marks.remove(m)
+                    break
+
+            # --- Step 1: mark a new with-trend wickless candle --------------
+            if trend == 1 and is_bull_mark[i]:
+                marks.append({"dir": 1, "level": bars[i].l, "born": i})
+            elif trend == -1 and is_bear_mark[i]:
+                marks.append({"dir": -1, "level": bars[i].h, "born": i})
+
+            # Expire: aged out, or price closed clean through the level, which
+            # means the "unfilled wick" thesis for that candle is dead.
+            marks = [m for m in marks
+                     if i - m["born"] <= zone_max_age
+                     and not (m["dir"] == 1 and bars[i].c < m["level"])
+                     and not (m["dir"] == -1 and bars[i].c > m["level"])]
+
+        self.start_long = start_long
+        self.start_short = start_short
+        self.entries = entries
+        self.stops = stops
+        self.targets = targets
+        self.allow_entry_bar_fill = True
+        # bardfx describes ONE target at roughly 1:1, not a scale-out. Leaving
+        # the default half-off at TP1 in place would score a win as 0.75R
+        # against a 1R loss and quietly move breakeven to 57%.
+        self.partial_at_tp1 = False
+        self.trends = trends
+
+        # Posture series so engine.run() can consume it too. Without brackets
+        # there is no stop or 1:1 target, so this holds until the opposite
+        # signal -- a materially different (and worse) strategy than the one
+        # described. `run.py --bracket` is the intended path.
+        positions = ["FLAT"] * n
+        pos = "FLAT"
+        for i in range(n):
+            if start_long[i]:
+                pos = "LONG"
+            elif start_short[i]:
+                pos = "SHORT"
+            positions[i] = pos
+        self.positions = positions
+
+    def decide(self, i):
+        return self.positions[i]
+
+    def to_pine(self):
+        p = self.params
+        return (f"//@version=6\n"
+                f"indicator(\"No Wick Retrace (free)\", overlay=true)\n"
+                f"tol = {p.get('wick_tol', 0.0)}\n"
+                f"bullMark = close > open and (open - low) <= tol\n"
+                f"bearMark = close < open and (high - open) <= tol\n"
+                f"// Mark the flat edge of a with-trend wickless candle, wait for\n"
+                f"// price to retrace to it, enter there with a stop {p.get('stop_buffer_atr', 0.50)}x ATR\n"
+                f"// beyond it and a {p.get('rr', 1.0)}:1 target.\n"
+                f"plotshape(bullMark, style=shape.triangleup, location=location.belowbar)\n"
+                f"plotshape(bearMark, style=shape.triangledown, location=location.abovebar)\n")
+
+
 REGISTRY = {
     "sma": SMACrossover,
     "rsi": RSIMeanReversion,
@@ -918,6 +1153,7 @@ REGISTRY = {
     "po3": PowerOfThree,
     "lorentzian": LorentzianClassification,
     "sdz": SupplyDemandStructure,
+    "nowick": NoWickRetrace,
 }
 
 

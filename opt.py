@@ -15,6 +15,7 @@ from typing import Dict, List, Tuple
 
 from engine import Bar, Report, run
 from strategies import REGISTRY
+from brackets import BracketReport, run_brackets
 
 # Small, hand-picked grids per strategy -- wide enough to matter, narrow
 # enough that a full sweep finishes in a couple seconds.
@@ -35,7 +36,84 @@ PARAM_GRIDS: Dict[str, Dict[str, list]] = {
     "lorentzian": {"neighbors": [5, 8, 12], "max_bars_back": [1000, 2000]},
     "sdz": {"min_rr": [2.0, 2.5, 3.0], "pivot_lookback": [3, 5, 8],
             "impulse_atr": [1.5, 2.0, 3.0]},
+    # wick_tol_frac matters most on forex, where an exactly-zero wick is rare
+    # -- see the timeframe warning in NoWickRetrace's docstring.
+    "nowick": {"rr": [1.0, 1.5, 2.0], "stop_buffer_atr": [0.25, 0.5, 1.0],
+               "trend_mode": ["structure", "ema"], "stop_mode": ["candle", "structure"],
+               "wick_tol_frac": [0.0, 0.05]},
 }
+
+
+def is_bracket_strategy(strategy_key: str) -> bool:
+    """True when the strategy's whole geometry lives in stops/targets/entries
+    rather than in the posture series engine.run() consumes.
+
+    This matters more than it looks. `nowick`'s grid tunes rr, stop_buffer_atr
+    and stop_mode -- none of which engine.run() can see, because it has no
+    concept of a stop or a target. Grid-searching it through run() produces a
+    table where every row scores identically, which reads like a result and is
+    actually the optimizer measuring nothing at all. `sdz` has the same shape.
+    """
+    cls = REGISTRY.get(strategy_key)
+    if cls is None:
+        return False
+    return hasattr(cls, "prepare") and strategy_key in ("sdz", "nowick")
+
+
+def _bracket_report(strategy_key: str, bars: List[Bar], params: dict) -> BracketReport:
+    """Score one param set the way the strategy is actually meant to trade.
+    Pessimistic policy only: if a param set only looks good when same-bar ties
+    break your way, it isn't a result worth ranking."""
+    strat = REGISTRY[strategy_key](bars=bars, params=params)
+    return run_brackets(
+        bars, strat.start_long, strat.start_short,
+        stops=getattr(strat, "stops", None),
+        targets=getattr(strat, "targets", None),
+        entries=getattr(strat, "entries", None),
+        allow_entry_bar_fill=getattr(strat, "allow_entry_bar_fill", False),
+        partial_at_tp1=getattr(strat, "partial_at_tp1", True),
+        policy="pessimistic",
+    )
+
+
+def optimize_brackets(strategy_key: str, bars: List[Bar], train_frac: float = 0.7,
+                      top_n: int = 5) -> List[Tuple[dict, BracketReport, BracketReport]]:
+    """Grid search for bracket strategies, ranked by expectancy in R on the
+    train slice and re-checked on the held-out test slice."""
+    grid = PARAM_GRIDS.get(strategy_key)
+    if not grid:
+        raise ValueError(f"No param grid defined for '{strategy_key}'")
+    split = int(len(bars) * train_frac)
+    train_bars, test_bars = bars[:split], bars[split:]
+
+    scored = [(params, _bracket_report(strategy_key, train_bars, params))
+              for params in _grid_combos(grid)]
+    scored.sort(key=lambda x: x[1].avg_r, reverse=True)
+
+    out = []
+    for params, train_rep in scored[:top_n]:
+        test_rep = (_bracket_report(strategy_key, test_bars, params)
+                    if test_bars else train_rep)
+        out.append((params, train_rep, test_rep))
+    return out
+
+
+def format_bracket_results(strategy_key: str,
+                           results: List[Tuple[dict, BracketReport, BracketReport]]) -> str:
+    lines = [f"\n>> OPTIMIZATION: {REGISTRY[strategy_key].name} "
+             f"(bracket execution, ranked by train expectancy in R)"]
+    hdr = (f"{'params':62s} {'train R':>8s} {'train n':>8s} {'train win':>10s} "
+           f"{'test R':>8s} {'test n':>7s} {'test win':>9s}")
+    lines.append(hdr)
+    lines.append("-" * len(hdr))
+    for params, tr, te in results:
+        p_str = ",".join(f"{k}={v}" for k, v in params.items())
+        lines.append(f"{p_str:62s} {tr.avg_r:+8.3f} {tr.n:8d} {tr.win_rate*100:9.1f}% "
+                     f"{te.avg_r:+8.3f} {te.n:7d} {te.win_rate*100:8.1f}%")
+    lines.append("(expectancy in R, pessimistic same-bar resolution. A row with a "
+                 "handful of trades is noise, not a ranking -- check train n and test n "
+                 "before believing any of it.)")
+    return "\n".join(lines)
 
 
 def _grid_combos(grid: Dict[str, list]):

@@ -658,5 +658,341 @@ class TestSupplyDemand(unittest.TestCase):
             self.assertAlmostEqual(t.tp2, s.targets[t.entry_i], places=9)
 
 
+# ---------------------------------------------------------------------------
+# @bardfx "No Wick" retrace strategy
+# ---------------------------------------------------------------------------
+def _zigzag_closes(up=True, legs=10, leg_bars=8, step=12.0, retr=5.0, start=100.0):
+    """A piecewise-linear path with REAL swing points, so confirmed_pivots()
+    actually finds higher highs and higher lows (or lower lows and lower
+    highs). A monotonic staircase has no local extrema at all, produces no
+    pivots, and therefore leaves the structure trend permanently at 0 -- which
+    silently turns every structure-mode assertion into a vacuous pass."""
+    pts, px = [start], start
+    for k in range(legs):
+        px = px + (step if up else -step) if k % 2 == 0 else px - (retr if up else -retr)
+        pts.append(px)
+    closes = []
+    for a, b in zip(pts, pts[1:]):
+        for j in range(leg_bars):
+            closes.append(a + (b - a) * (j + 1) / leg_bars)
+    return closes
+
+
+def _plain(t, c, spread=0.4):
+    """o == c, so the bar is neither bullish nor bearish and can never be
+    mistaken for a wickless setup by the detector under test."""
+    return Bar(t=t, o=c, h=c + spread, l=c - spread, c=c, v=1.0)
+
+
+class TestNoWick(unittest.TestCase):
+    """@bardfx's 'no wick' setup: mark a with-trend candle missing its
+    trend-side wick, wait for price to come back to that flat edge, enter
+    there at 1:1."""
+
+    @staticmethod
+    def _bar(t, o, h, l, c):
+        return Bar(t=t, o=o, h=h, l=l, c=c, v=1.0)
+
+    # --- detection: the definition itself ----------------------------------
+    def test_exact_flat_bottom_on_a_bullish_candle_is_detected(self):
+        from strategies import NoWickRetrace
+        s = NoWickRetrace(bars=[self._bar(0, 100, 102, 100, 101)], params={})
+        self.assertTrue(s.debug_bull_marks[0])
+        self.assertFalse(s.debug_bear_marks[0])
+
+    def test_one_tick_bottom_wick_is_NOT_detected(self):
+        """The boundary that matters. Wickless is exact equality; a candle
+        that dipped even one tick below its open is an ordinary candle, and
+        counting it would quietly swap this for a far more permissive
+        strategy while still calling it 'no wick'."""
+        from strategies import NoWickRetrace
+        s = NoWickRetrace(bars=[self._bar(0, 100, 102, 99.99, 101)], params={})
+        self.assertFalse(s.debug_bull_marks[0])
+
+    def test_flat_top_on_a_bearish_candle_is_detected(self):
+        from strategies import NoWickRetrace
+        s = NoWickRetrace(bars=[self._bar(0, 100, 100, 98, 99)], params={})
+        self.assertTrue(s.debug_bear_marks[0])
+        self.assertFalse(s.debug_bull_marks[0])
+
+    def test_fully_wickless_bullish_candle_still_counts_as_bullish(self):
+        from strategies import NoWickRetrace
+        s = NoWickRetrace(bars=[self._bar(0, 100, 101, 100, 101)], params={})
+        self.assertTrue(s.debug_bull_marks[0])
+
+    def test_relative_tolerance_loosens_detection_for_forex(self):
+        """wick_tol_frac exists because an exactly-zero wick is rare on
+        5-decimal FX. A wick of 1% of the bar's range is not wickless at the
+        strict default and is at frac=0.05 -- the knob has to genuinely move
+        the definition, or it is decoration."""
+        from strategies import NoWickRetrace
+        bars = [self._bar(0, 100, 102, 99.98, 101)]
+        self.assertFalse(NoWickRetrace(bars=bars, params={}).debug_bull_marks[0])
+        loose = NoWickRetrace(bars=bars, params={"wick_tol_frac": 0.05})
+        self.assertTrue(loose.debug_bull_marks[0])
+
+    # --- trend gate --------------------------------------------------------
+    def _downtrend_of_bullish_wickless_bars(self):
+        """A genuine downtrend in which EVERY bar is a bullish wickless
+        candle. Detection therefore fires everywhere and the trend gate is
+        the only thing that can suppress a long."""
+        bars = []
+        for i, c in enumerate(_zigzag_closes(up=False)):
+            o = c - 0.6                       # bullish body...
+            bars.append(self._bar(i, o, c + 0.4, o, c))   # ...with a flat bottom
+        return bars
+
+    def test_no_longs_in_a_downtrend_structure_mode(self):
+        from strategies import NoWickRetrace
+        bars = self._downtrend_of_bullish_wickless_bars()
+        s = NoWickRetrace(bars=bars, params={"trend_mode": "structure"})
+        self.assertGreater(sum(s.debug_bull_marks), 0,
+                           "fixture must actually contain bullish wickless candles")
+        self.assertGreater(s.trends.count(-1), 0,
+                           "fixture must actually read as a downtrend, or this "
+                           "test passes for the wrong reason")
+        self.assertEqual(sum(s.start_long), 0,
+                         "no longs may fire in a persistent downtrend")
+
+    def test_no_longs_in_a_downtrend_ema_mode(self):
+        from strategies import NoWickRetrace
+        bars = self._downtrend_of_bullish_wickless_bars()
+        s = NoWickRetrace(bars=bars, params={"trend_mode": "ema"})
+        self.assertGreater(sum(s.debug_bull_marks), 0)
+        self.assertGreater(s.trends.count(-1), 0)
+        self.assertEqual(sum(s.start_long), 0,
+                         "no longs may fire below a falling EMA either")
+
+    # --- entry -------------------------------------------------------------
+    def _setup(self, retrace_offset):
+        """Uptrend with real swings, one wickless bullish candle at price P,
+        then a single bar that pulls back to P + `retrace_offset`."""
+        closes = _zigzag_closes(up=True)
+        bars = [_plain(i, c) for i, c in enumerate(closes)]
+        P = closes[-1]
+        bars.append(self._bar(len(bars), P, P + 1.4, P, P + 1.0))   # the mark
+        for _ in range(3):
+            bars.append(_plain(len(bars), P + 1.2))
+        bars.append(self._bar(len(bars), P + 0.5, P + 0.9,
+                              P + retrace_offset, P + 0.5))          # the retrace
+        for _ in range(40):
+            bars.append(_plain(len(bars), P + 1.5))
+        return bars, P
+
+    def test_touching_only_the_body_does_not_trigger(self):
+        from strategies import NoWickRetrace
+        bars, _ = self._setup(retrace_offset=+0.3)
+        s = NoWickRetrace(bars=bars, params={})
+        self.assertEqual(sum(s.start_long), 0,
+                         "a pullback into the body is not a fill of the flat edge")
+
+    def test_touching_the_flat_edge_triggers_at_that_level(self):
+        from strategies import NoWickRetrace
+        bars, P = self._setup(retrace_offset=-0.01)
+        s = NoWickRetrace(bars=bars, params={})
+        self.assertEqual(sum(s.start_long), 1, "the flat edge was touched")
+        i = s.start_long.index(True)
+        self.assertAlmostEqual(s.entries[i], P, places=9,
+                               msg="entry is the marked level -- a resting limit "
+                                   "order -- not the signal bar's close")
+        self.assertNotAlmostEqual(s.entries[i], bars[i].c, places=6)
+
+    def test_a_candle_cannot_trigger_its_own_level(self):
+        """The marking bar's own low IS the level, so without ordering care
+        every wickless candle would instantly self-fill."""
+        from strategies import NoWickRetrace
+        bars, _ = self._setup(retrace_offset=+50.0)
+        s = NoWickRetrace(bars=bars, params={})
+        for i, marked in enumerate(s.debug_bull_marks):
+            if marked:
+                self.assertFalse(s.start_long[i],
+                                 f"bar {i} both marked and entered on itself")
+
+    def test_both_trend_modes_reach_the_same_entry(self):
+        from strategies import NoWickRetrace
+        bars, P = self._setup(retrace_offset=-0.01)
+        for mode in ("structure", "ema"):
+            with self.subTest(trend_mode=mode):
+                s = NoWickRetrace(bars=bars, params={"trend_mode": mode})
+                self.assertEqual(sum(s.start_long), 1)
+                self.assertAlmostEqual(s.entries[s.start_long.index(True)], P, places=9)
+
+    # --- levels ------------------------------------------------------------
+    def test_rr_1_means_target_distance_equals_risk_distance(self):
+        from strategies import NoWickRetrace
+        bars, _ = self._setup(retrace_offset=-0.01)
+        s = NoWickRetrace(bars=bars, params={"rr": 1.0})
+        i = s.start_long.index(True)
+        risk = s.entries[i] - s.stops[i]
+        reward = s.targets[i] - s.entries[i]
+        self.assertGreater(risk, 0)
+        self.assertAlmostEqual(reward, risk, places=9)
+
+    def test_rr_2_doubles_the_target_distance(self):
+        from strategies import NoWickRetrace
+        bars, _ = self._setup(retrace_offset=-0.01)
+        s = NoWickRetrace(bars=bars, params={"rr": 2.0})
+        i = s.start_long.index(True)
+        risk = s.entries[i] - s.stops[i]
+        self.assertAlmostEqual(s.targets[i] - s.entries[i], 2 * risk, places=9)
+
+    def test_stop_modes_produce_different_risk(self):
+        """'Below the candle with breathing room' and 'at the swing low' are
+        different trades; if they weren't, the parameter would be a lie."""
+        from strategies import NoWickRetrace
+        bars, _ = self._setup(retrace_offset=-0.01)
+        a = NoWickRetrace(bars=bars, params={"stop_mode": "candle"})
+        b = NoWickRetrace(bars=bars, params={"stop_mode": "structure"})
+        ia, ib = a.start_long.index(True), b.start_long.index(True)
+        self.assertLess(b.stops[ib], a.stops[ia],
+                        "the swing low sits below the candle, so the structural "
+                        "stop must be the wider one here")
+
+    def test_buffer_widens_the_stop(self):
+        from strategies import NoWickRetrace
+        bars, _ = self._setup(retrace_offset=-0.01)
+        tight = NoWickRetrace(bars=bars, params={"stop_buffer_atr": 0.05})
+        wide = NoWickRetrace(bars=bars, params={"stop_buffer_atr": 0.50})
+        it, iw = tight.start_long.index(True), wide.start_long.index(True)
+        self.assertLess(wide.stops[iw], tight.stops[it],
+                        "more breathing room means a lower stop on a long")
+
+    def test_registered_and_routed(self):
+        from strategies import REGISTRY
+        from gen import plan_from_text
+        self.assertIn("nowick", REGISTRY)
+        self.assertEqual(plan_from_text("no wick")[0], "nowick")
+        self.assertEqual(plan_from_text("wickless candles")[0], "nowick")
+
+
+class TestBracketLimitEntry(unittest.TestCase):
+    """The three brackets.py extensions No Wick needs: limit entries,
+    entry-bar fills, and a single target with no scale-out."""
+
+    @staticmethod
+    def _bar(t, o, h, l, c):
+        return Bar(t=t, o=o, h=h, l=l, c=c, v=1.0)
+
+    def _bars(self):
+        # Bar 2 is the entry bar: it dips to 99 (the limit level) and then
+        # runs up through 100 within that same bar.
+        return [
+            self._bar(0, 100, 100.5, 99.5, 100),
+            self._bar(1, 100, 100.5, 99.5, 100),      # sets ATR
+            self._bar(2, 100, 101.5, 99.0, 99.3),
+            self._bar(3, 99.3, 99.4, 99.1, 99.2),     # never reaches 100
+        ]
+
+    def _run(self, allow, *, entry=99.0, stop=98.0, target=100.0, partial=False):
+        from brackets import run_brackets
+        bars = self._bars()
+        n = len(bars)
+        sl = [False] * n
+        sl[2] = True
+        nan = float("nan")
+        entries = [nan] * n; entries[2] = entry
+        stops = [nan] * n;   stops[2] = stop
+        targets = [nan] * n; targets[2] = target
+        rep = run_brackets(bars, sl, [False] * n, atr_len=1,
+                           stops=stops, targets=targets, entries=entries,
+                           allow_entry_bar_fill=allow, partial_at_tp1=partial)
+        self.assertEqual(rep.n, 1)
+        return rep.trades[0]
+
+    def test_entry_price_is_the_limit_level_not_the_close(self):
+        t = self._run(True)
+        self.assertAlmostEqual(t.entry_px, 99.0)
+        self.assertAlmostEqual(t.stop0, 98.0)
+        self.assertAlmostEqual(t.risk, 1.0)
+
+    def test_entry_bar_can_resolve_when_allowed(self):
+        """The target at 100 is inside the entry bar's range (high 101.5).
+        A limit filled mid-bar leaves the rest of that bar tradeable, so it
+        must be able to resolve there."""
+        t = self._run(True)
+        self.assertEqual(t.exit_i, 2, "should have resolved on the entry bar")
+        self.assertEqual(t.exit_reason, "tp2")
+        self.assertAlmostEqual(t.r_multiple, 1.0, places=9)
+
+    def test_entry_bar_cannot_resolve_when_disallowed(self):
+        """Same geometry with the switch off: the entry bar is skipped, and
+        nothing on later bars reaches either level, so it flattens at the end.
+        This is the default, and it is what keeps close-entry strategies
+        (lorentzian, sdz) free of lookahead."""
+        t = self._run(False)
+        self.assertNotEqual(t.exit_i, 2)
+        self.assertEqual(t.exit_reason, "eod")
+
+    def test_entry_bar_open_is_not_treated_as_a_gap(self):
+        """The entry bar's open happened BEFORE the limit filled, so it cannot
+        gap a level that was not live yet. Here the open (100) is already
+        through a target at 99.5 for a long entered at 99 -- if the gap path
+        ran on the entry bar it would fill at 100 and book a fictitious 2R."""
+        t = self._run(True, target=99.5, stop=98.5)
+        self.assertAlmostEqual(t.fills[-1].px, 99.5,
+                               msg="must fill at the target, not the entry bar's open")
+        self.assertAlmostEqual(t.r_multiple, 1.0, places=9)
+
+    def test_single_target_scores_differently_than_a_scale_out(self):
+        """A strategy described as one 1:1 target must not be silently given
+        a half-off at 0.5R: that scores a win as 0.75R against a 1R loss and
+        moves breakeven from 50% to 57%."""
+        single = self._run(True, partial=False)
+        scaled = self._run(True, partial=True)
+        self.assertAlmostEqual(single.r_multiple, 1.0, places=9)
+        self.assertLess(scaled.r_multiple, single.r_multiple)
+
+    def test_defaults_are_untouched_without_the_new_arguments(self):
+        """Regression guard: omit entries/partial and the close-entry bracket
+        must behave exactly as before, or every existing number moves."""
+        from brackets import run_brackets
+        bars = self._bars()
+        n = len(bars)
+        sl = [False] * n
+        sl[2] = True
+        rep = run_brackets(bars, sl, [False] * n, atr_len=1)
+        self.assertEqual(rep.n, 1)
+        self.assertAlmostEqual(rep.trades[0].entry_px, bars[2].c)
+        self.assertTrue(rep.trades[0].partial)
+
+
+class TestBracketOptimizer(unittest.TestCase):
+    """A grid search that cannot see the parameters it is sweeping is worse
+    than no grid search: it prints a ranking of identical numbers."""
+
+    def _bars(self):
+        import data as D
+        return D.load_csv(D.sample_csv())
+
+    def test_bracket_strategies_are_routed_to_the_bracket_optimizer(self):
+        from opt import is_bracket_strategy
+        self.assertTrue(is_bracket_strategy("nowick"))
+        self.assertTrue(is_bracket_strategy("sdz"))
+        self.assertFalse(is_bracket_strategy("rsi"))
+        self.assertFalse(is_bracket_strategy("lorentzian"))
+
+    def test_grid_params_actually_move_the_score(self):
+        """The bug this path exists to prevent: rr / stop_buffer_atr / stop_mode
+        are invisible to engine.run(), so ranking through it gave every row the
+        same number. Scored through brackets, the grid must discriminate."""
+        from opt import optimize_brackets
+        results = optimize_brackets("nowick", self._bars(), top_n=8)
+        self.assertGreater(len(results), 1)
+        scores = {round(tr.avg_r, 6) for _, tr, _ in results}
+        self.assertGreater(len(scores), 1,
+                           "every param set scored identically -- the optimizer "
+                           "is not seeing the parameters")
+
+    def test_rr_reaches_the_emitted_target(self):
+        """Cheap end-to-end proof the param survives the whole chain:
+        strategy -> stops/targets -> bracket trade geometry."""
+        from opt import _bracket_report
+        bars = self._bars()
+        rep = _bracket_report("nowick", bars, {"rr": 2.0, "trend_mode": "ema"})
+        for t in rep.trades:
+            reward = abs(t.tp2 - t.entry_px)
+            self.assertAlmostEqual(reward / t.risk, 2.0, places=6)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

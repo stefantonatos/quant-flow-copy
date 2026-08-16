@@ -54,6 +54,7 @@ class BracketTrade:
     exit_reason: str = ""
     r_multiple: float = 0.0
     ambiguous: bool = False   # a same-bar stop+target tie was resolved by policy
+    partial: bool = True      # False = one target, no half-off at TP1
 
 
 @dataclass
@@ -137,12 +138,21 @@ class BracketReport:
 def _build_bracket(bars: List[Bar], i: int, side: str, atr_val: float,
                     sl_atr: float, be_offset_atr: float,
                     stop_px: Optional[float] = None,
-                    target_px: Optional[float] = None) -> BracketTrade:
+                    target_px: Optional[float] = None,
+                    entry_level: Optional[float] = None,
+                    partial: bool = True) -> BracketTrade:
     """`stop_px` / `target_px` let a strategy supply its own structural levels
     (e.g. a stop below a demand zone, a target at the last swing high) instead
     of having them derived from ATR. When neither is given the behaviour is
-    exactly the original ATR bracket -- SL at sl_atr x ATR, TP1 1R, TP2 2R."""
-    entry_px = bars[i].c
+    exactly the original ATR bracket -- SL at sl_atr x ATR, TP1 1R, TP2 2R.
+
+    `entry_level` is for strategies that fill on a RESTING LIMIT ORDER at a
+    marked price rather than at the signal bar's close (NoWickRetrace does:
+    the order sits at the wickless candle's flat edge and fills when price
+    comes back to touch it). Omit it and entry is the bar's close, unchanged.
+    """
+    entry_px = bars[i].c if entry_level is None or entry_level != entry_level \
+        else entry_level
 
     if stop_px is not None and stop_px == stop_px:
         risk = abs(entry_px - stop_px)
@@ -152,35 +162,57 @@ def _build_bracket(bars: List[Bar], i: int, side: str, atr_val: float,
         stop0 = entry_px - risk if side == "LONG" else entry_px + risk
 
     if target_px is not None and target_px == target_px:
-        # Single structural target: TP2 is the real exit, TP1 sits at the
-        # halfway point so the partial-exit machinery still applies.
+        # Single structural target: TP2 is the real exit. TP1 sits at the
+        # halfway point so the partial-exit machinery still applies -- unless
+        # the strategy says it takes one target and one only, in which case
+        # TP1 must not exist at all. Faking a partial where the described
+        # strategy has none silently changes the payoff: half off at 0.5R and
+        # half at 1R scores a "win" as 0.75R against a 1R loss, which pushes
+        # the breakeven win rate from 50% to 57%.
         tp2 = target_px
-        tp1 = entry_px + (tp2 - entry_px) / 2.0
+        tp1 = tp2 if not partial else entry_px + (tp2 - entry_px) / 2.0
     elif side == "LONG":
         tp1, tp2 = entry_px + risk, entry_px + 2 * risk
     else:
         tp1, tp2 = entry_px - risk, entry_px - 2 * risk
 
     return BracketTrade(side=side, entry_i=i, entry_px=entry_px,
-                        stop0=stop0, tp1=tp1, tp2=tp2, risk=risk)
+                        stop0=stop0, tp1=tp1, tp2=tp2, risk=risk, partial=partial)
 
 
 def _resolve(trade: BracketTrade, bars: List[Bar], be_offset_atr: float,
-             atr_val: float, policy: Policy) -> None:
-    """Walk bars forward from entry_i+1, filling the trade in place."""
+             atr_val: float, policy: Policy,
+             allow_entry_bar_fill: bool = False) -> None:
+    """Walk bars forward from entry_i+1, filling the trade in place.
+
+    `allow_entry_bar_fill` starts the walk at entry_i instead. That is WRONG
+    when entry is the bar's close -- the bar is already over, so anything it
+    did was in the past, and letting it fill is lookahead. It is RIGHT when
+    entry was a limit fill part-way through the bar (see `entry_level` in
+    _build_bracket): the remainder of that bar is genuinely tradeable, and
+    excluding it would systematically flatter a tight-stop 1:1 strategy by
+    silently dropping the trades that resolve fastest. Default stays False so
+    the lorentzian and sdz paths are untouched.
+    """
     long = trade.side == "LONG"
     half_off = False
     stop = trade.stop0
     be_price = (trade.entry_px + be_offset_atr * atr_val if long
                 else trade.entry_px - be_offset_atr * atr_val)
 
-    for j in range(trade.entry_i + 1, len(bars)):
+    first = trade.entry_i if allow_entry_bar_fill else trade.entry_i + 1
+    for j in range(first, len(bars)):
         b = bars[j]
 
+        # The entry bar has no gap semantics: its open happened BEFORE the
+        # limit filled, so it cannot gap a level that wasn't live yet. Only
+        # the intrabar checks below apply there.
+        if j == trade.entry_i:
+            pass
         # Gaps first: if the bar opens through a level, that level fills at
         # the open, not at the level itself -- filling at the level when
         # price gapped straight through it is free money that never existed.
-        if long:
+        elif long:
             if b.o <= stop:
                 trade.fills.append(BracketFill(j, b.o, "stop"))
                 trade.exit_i, trade.exit_reason = j, "stop"
@@ -189,7 +221,7 @@ def _resolve(trade: BracketTrade, bars: List[Bar], be_offset_atr: float,
                 trade.fills.append(BracketFill(j, b.o, "tp2"))
                 trade.exit_i, trade.exit_reason = j, "tp2"
                 break
-            if b.o >= trade.tp1 and not half_off:
+            if trade.partial and b.o >= trade.tp1 and not half_off:
                 trade.fills.append(BracketFill(j, b.o, "tp1"))
                 half_off = True
                 stop = be_price
@@ -203,16 +235,18 @@ def _resolve(trade: BracketTrade, bars: List[Bar], be_offset_atr: float,
                 trade.fills.append(BracketFill(j, b.o, "tp2"))
                 trade.exit_i, trade.exit_reason = j, "tp2"
                 break
-            if b.o <= trade.tp1 and not half_off:
+            if trade.partial and b.o <= trade.tp1 and not half_off:
                 trade.fills.append(BracketFill(j, b.o, "tp1"))
                 half_off = True
                 stop = be_price
                 continue
 
-        # Intrabar. Never let the entry bar's own range fill anything --
-        # that's classic lookahead. j already starts at entry_i + 1.
+        # Intrabar. For a close-entry bracket the entry bar's own range must
+        # never fill anything -- that's classic lookahead, and `first` above
+        # excludes it. A limit-entry bracket opts in deliberately.
         hit_stop = (b.l <= stop) if long else (b.h >= stop)
-        target = trade.tp2 if half_off else trade.tp1
+        final_leg = half_off or not trade.partial
+        target = trade.tp2 if final_leg else trade.tp1
         hit_target = (b.h >= target) if long else (b.l <= target)
 
         if hit_stop and hit_target:
@@ -229,7 +263,7 @@ def _resolve(trade: BracketTrade, bars: List[Bar], be_offset_atr: float,
             trade.fills.append(BracketFill(j, stop, "stop"))
             trade.exit_i, trade.exit_reason = j, "stop"
             break
-        elif half_off:
+        elif final_leg:
             trade.fills.append(BracketFill(j, trade.tp2, "tp2"))
             trade.exit_i, trade.exit_reason = j, "tp2"
             break
@@ -281,16 +315,20 @@ def run_brackets(bars: List[Bar], start_long: List[bool], start_short: List[bool
                   atr_len: int = 14, sl_atr: float = 1.0, be_offset_atr: float = 0.15,
                   policy: Policy = "pessimistic",
                   stops: Optional[List[float]] = None,
-                  targets: Optional[List[float]] = None) -> BracketReport:
+                  targets: Optional[List[float]] = None,
+                  entries: Optional[List[float]] = None,
+                  allow_entry_bar_fill: bool = False,
+                  partial_at_tp1: bool = True) -> BracketReport:
     """One bracket at a time: a signal is ignored while a trade is open,
     matching the source indicator's own single-position behaviour (it can't
     fire a fresh startLongTrade while already long, since that requires the
     underlying `signal` to change).
 
-    `stops` / `targets` are optional per-bar lists of explicit price levels,
-    parallel to start_long/start_short. Supply them for structure-based
-    strategies (SupplyDemandStructure does); omit them and stops fall back to
-    sl_atr x ATR with TP1/TP2 at 1R/2R, unchanged."""
+    `stops` / `targets` / `entries` are optional per-bar lists of explicit
+    price levels, parallel to start_long/start_short. Supply stops/targets for
+    structure-based strategies (SupplyDemandStructure does) and `entries` for
+    limit-order strategies (NoWickRetrace does); omit them all and entry is the
+    bar's close with stops at sl_atr x ATR and TP1/TP2 at 1R/2R, unchanged."""
     atr_series = atr(bars, atr_len)
     trades: List[BracketTrade] = []
     i = 0
@@ -307,11 +345,13 @@ def run_brackets(bars: List[Bar], start_long: List[bool], start_short: List[bool
             continue
         sp = stops[i] if (stops is not None and i < len(stops)) else None
         tg = targets[i] if (targets is not None and i < len(targets)) else None
-        trade = _build_bracket(bars, i, side, a, sl_atr, be_offset_atr, sp, tg)
+        en = entries[i] if (entries is not None and i < len(entries)) else None
+        trade = _build_bracket(bars, i, side, a, sl_atr, be_offset_atr, sp, tg, en,
+                               partial_at_tp1)
         if trade.risk <= 0:   # degenerate structural stop at the entry price
             i += 1
             continue
-        _resolve(trade, bars, be_offset_atr, a, policy)
+        _resolve(trade, bars, be_offset_atr, a, policy, allow_entry_bar_fill)
         trades.append(trade)
         i = trade.exit_i + 1  # no overlapping brackets
     return BracketReport(trades=trades, policy=policy)
@@ -321,13 +361,18 @@ def run_both_policies(bars: List[Bar], start_long: List[bool], start_short: List
                        atr_len: int = 14, sl_atr: float = 1.0,
                        be_offset_atr: float = 0.15,
                        stops: Optional[List[float]] = None,
-                       targets: Optional[List[float]] = None
+                       targets: Optional[List[float]] = None,
+                       entries: Optional[List[float]] = None,
+                       allow_entry_bar_fill: bool = False,
+                       partial_at_tp1: bool = True
                        ) -> tuple[BracketReport, BracketReport]:
     """Convenience: run pessimistic and optimistic side by side. The gap
     between them bounds how much of any headline number is fill-order
     guesswork versus real edge."""
     pess = run_brackets(bars, start_long, start_short, atr_len, sl_atr, be_offset_atr,
-                        "pessimistic", stops, targets)
+                        "pessimistic", stops, targets, entries, allow_entry_bar_fill,
+                        partial_at_tp1)
     opt = run_brackets(bars, start_long, start_short, atr_len, sl_atr, be_offset_atr,
-                       "optimistic", stops, targets)
+                       "optimistic", stops, targets, entries, allow_entry_bar_fill,
+                       partial_at_tp1)
     return pess, opt
