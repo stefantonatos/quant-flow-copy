@@ -317,8 +317,17 @@ bgcolor(trend == 1 ? color.new(bullColor, 94) : trend == -1 ? color.new(bearColo
 // ==================
 // ==== Alerts ======
 // ==================
+// alertcondition() is silently inert inside a strategy() -- TradingView warns
+// about it at compile time and then ignores it. alert() is the form that
+// works here. To use these: create the alert with condition
+// "Any alert() function call".
+//
+// Order fills do not need anything here. TradingView raises those from the
+// strategy's own entries and exits.
 
-alertcondition(bullMark, title="Wickless bullish candle",
-     message="No Wick: bullish wickless candle marked on {{ticker}} {{interval}}")
-alertcondition(bearMark, title="Wickless bearish candle",
-     message="No Wick: bearish wickless candle marked on {{ticker}} {{interval}}")
+if bullMark
+    alert("No Wick: bullish wickless candle marked on " + syminfo.ticker +
+          " " + timeframe.period, alert.freq_once_per_bar_close)
+if bearMark
+    alert("No Wick: bearish wickless candle marked on " + syminfo.ticker +
+          " " + timeframe.period, alert.freq_once_per_bar_close)
