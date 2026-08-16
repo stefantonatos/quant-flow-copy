@@ -1124,17 +1124,12 @@ class NoWickRetrace(Strategy):
         return self.positions[i]
 
     def to_pine(self):
-        p = self.params
-        return (f"//@version=6\n"
-                f"indicator(\"No Wick Retrace (free)\", overlay=true)\n"
-                f"tol = {p.get('wick_tol', 0.0)}\n"
-                f"bullMark = close > open and (open - low) <= tol\n"
-                f"bearMark = close < open and (high - open) <= tol\n"
-                f"// Mark the flat edge of a with-trend wickless candle, wait for\n"
-                f"// price to retrace to it, enter there with a stop {p.get('stop_buffer_atr', 0.50)}x ATR\n"
-                f"// beyond it and a {p.get('rr', 1.0)}:1 target.\n"
-                f"plotshape(bullMark, style=shape.triangleup, location=location.belowbar)\n"
-                f"plotshape(bearMark, style=shape.triangledown, location=location.abovebar)\n")
+        return ("// Full Pine Script v6 source: see pine/no_wick.pine in this repo.\n"
+                "// It is a strategy(), not an indicator() -- paste it into\n"
+                "// TradingView and the Strategy Tester backtests it on real chart\n"
+                "// data, which is the point: this container has no market-data\n"
+                "// access, so TradingView is where this setup actually gets\n"
+                "// measured. Inputs and defaults mirror this class one-for-one.\n")
 
 
 REGISTRY = {

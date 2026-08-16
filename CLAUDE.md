@@ -117,6 +117,33 @@ bracket strategy, add it to that predicate.
 knowing, because they prove the new defaults didn't leak: `lorentzian --bracket` must stay
 **−0.183 R over 23 trades** and `sdz --bracket` **+0.226 R over 15 trades** on sample data.
 
+**`pine/no_wick.pine` — and this is the one that unblocks the project.** Stefan asked for
+No Wick on TradingView, noting the xGhozt indicator's source is locked. **The locked source
+is a non-issue**: wickless is exact equality on OHLC (`low == open` on a green candle), so
+there is no hidden algorithm to recover — the protected part is the drawing, not the
+definition. Don't waste another session trying to obtain it.
+
+The file is a **`strategy()`, not an `indicator()`**, deliberately: TradingView's Strategy
+Tester then backtests it against his own 15m forex chart. **That is the first real market
+data this project has ever had** — the CSV-export ask that has blocked everything since day
+one is sidestepped entirely for any strategy expressible in Pine. Consider the same route
+before asking Stefan to export anything again.
+
+It is standalone and hand-written — **not** part of `build_pine.py`, which exists only to
+patch jdehorty's file while keeping it byte-identical. Inputs mirror `NoWickRetrace`
+one-for-one so the Python and Pine results are comparable. Entry uses
+`strategy.entry(..., limit=level)`, a genuine resting order, so TradingView decides the
+fill rather than us; the order rests at the nearest live level on the correct side of price
+and is cancelled when no level is live. Single exit, no scale-out (matches
+`partial_at_tp1=False`). **Not yet compiled** — same paste → error → fix loop as the
+Lorentzian file, which took two rounds.
+
+Two things to insist on when the numbers arrive: **set commission and slippage** (at 1:1
+with a sub-ATR stop the FX spread is a large share of the risk, and "edge smaller than
+costs" is a different finding from "no edge"), and **check how TradingView's broker
+emulator resolves a bar containing both the stop and the target** — unverified, and with
+this geometry most trades will hit that case. Bar Magnifier is what actually resolves it.
+
 **Still nothing validated.** Every number above is synthetic random-walk sample data
 (`data.py`), which has no market structure — smoke tests that the pipeline runs, not
 measurements of edge. Both new strategies fire only a handful of trades on it. The real
