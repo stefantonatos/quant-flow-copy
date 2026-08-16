@@ -138,6 +138,28 @@ and is cancelled when no level is live. Single exit, no scale-out (matches
 `partial_at_tp1=False`). **Not yet compiled** — same paste → error → fix loop as the
 Lorentzian file, which took two rounds.
 
+**Pine line-continuation rule, learned the hard way (CE at `161:40`).** Outside brackets,
+a wrapped line must be indented by a number of spaces that is **not** a multiple of four —
+otherwise Pine reads it as a new block and throws `Syntax error ... "end of line without
+line continuation"`. Inside an unclosed bracket, wrapping is unrestricted, which is why the
+multi-line `strategy(...)`, `plotshape(...)` and `bgcolor(...)` calls in the same file were
+always fine. Safest habit: wrap long expressions in parentheses. Add this to the gotcha
+list below.
+
+**Live results so far (2026-08-16, Stefan's own 15m forex chart).** The script compiles and
+runs. **Its wickless marks are identical to the xGhozt indicator's, confirmed on-chart** —
+that closes the locked-source question empirically; do not reopen it. He reports it as
+profitable, but **that number is not yet trustworthy**: commission/slippage were not
+confirmed set, trade count is unknown, and at 1:1 the win rate alone says nothing. Ask for
+profit factor, net profit and trade count before treating any of it as a result.
+
+**Known live defect, fixed but unverified: `trend_mode="structure"` shorts obvious
+uptrends.** With a 5-bar pivot on 15m the structure gate reads only about an hour, so a
+routine pullback prints a lower low and lower high and flips it bearish. A `"both"` mode
+(structure AND EMA must agree) was added to the Pine file, `strategies.py` and the opt grid.
+Default stays `"structure"` so earlier numbers stay reproducible. Stefan had not yet
+re-pasted and re-tested when the session ended.
+
 Two things to insist on when the numbers arrive: **set commission and slippage** (at 1:1
 with a sub-ATR stop the FX spread is a large share of the risk, and "edge smaller than
 costs" is a different finding from "no edge"), and **check how TradingView's broker

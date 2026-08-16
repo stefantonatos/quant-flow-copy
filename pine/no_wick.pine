@@ -158,9 +158,13 @@ emaTrend    = na(emaVal) ? 0 : close > emaVal ? 1 : close < emaVal ? -1 : 0
 // "both" requires structure and the EMA to agree, so a pullback that has not
 // broken the bigger trend produces no trade at all rather than a
 // counter-trend one. Strictly fewer trades; that is the intended trade-off.
-trend = trendMode == "ema" ? emaTrend :
-        trendMode == "both" ? (structTrend == emaTrend ? structTrend : 0) :
-        structTrend
+// Wrapped inside parentheses on purpose: outside brackets, Pine requires a
+// continuation line to be indented by a number of spaces that is NOT a
+// multiple of four, or it reads as a new block and throws "end of line
+// without line continuation". Inside brackets, wrapping is unrestricted.
+trend = (trendMode == "ema" ? emaTrend :
+         trendMode == "both" ? (structTrend == emaTrend ? structTrend : 0) :
+         structTrend)
 
 // ==============================
 // ==== Wickless detection ======
