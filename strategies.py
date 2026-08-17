@@ -1146,6 +1146,204 @@ class NoWickRetrace(Strategy):
                 "// measured. Inputs and defaults mirror this class one-for-one.\n")
 
 
+class AsiaSweepCSD(Strategy):
+    """Asia liquidity sweep + change in state of delivery, targeting the
+    opposite side of the Asian range.
+
+    From a video transcript Stefan sent. The rules as stated:
+      1. Mark the Asian session high and low (he uses Leviathan's Market
+         Sessions indicator; a screenshot confirms it is set to UTC).
+      2. Wait for price to sweep one side of that range.
+      3. Drop to the 5-minute chart and wait for a "change in state of
+         delivery" (CSD).
+      4. Enter on the close of the CSD candle.
+      5. Target the OPPOSITE Asia level. He calls it a 3RR trade.
+
+    Note (5) carefully: the target is a fixed price, not an R multiple. So
+    the reward:risk of any given setup is whatever the geometry happens to
+    give -- "3RR" describes the example on screen, it is not a rule. Some
+    setups will offer far less. `min_rr` exists to skip those, and it is the
+    single input most likely to change the results, so it is off (0.0) by
+    default rather than quietly filtering trades nobody asked to filter.
+
+    THREE THINGS THE TRANSCRIPT DOES NOT DEFINE, decided here and exposed as
+    parameters rather than baked in:
+
+    - `csd_mode` -- what a "change in state of delivery" actually is. He was
+      asked and said he didn't know. Default `"candle"` is the standard ICT
+      reading: the first bar closing back above the high of the most recent
+      down-close bar (mirrored for shorts). `"swing"` is looser -- a close
+      beyond the highest high of the last `swing_lookback` bars, i.e. a mini
+      break of structure.
+    - `one_per_day` -- default True, first valid setup only.
+    - Session hours -- default 00:00-08:00 UTC. Confirm against whatever the
+      Leviathan indicator is actually set to before trusting any result.
+
+    Stop placement was specified: below the sweep extreme (the wick that took
+    the level), plus an ATR buffer.
+
+    This is the third video strategy in this repo and the same caveat applies
+    to all of them: it is *a* mechanization of a discretionary description,
+    not *the* strategy. Say so when reporting numbers.
+
+    NEEDS INTRADAY BARS WITH UTC TIMESTAMPS. On the daily sample data every
+    bar lands in hour 0, so the session logic degenerates and it will produce
+    nothing. That is expected, not a bug.
+
+    Exposes start_long/start_short/stops/targets for brackets.py. Entry is
+    the CSD bar's close, so entry-bar fills stay off (the default).
+    """
+
+    name = "Asia Sweep + CSD"
+    description = ("Mark the Asian session range, wait for a sweep of one side, then "
+                    "enter on a change in the state of delivery back the other way, "
+                    "targeting the opposite side of the range. Needs intraday bars "
+                    "with UTC timestamps -- see the class docstring.")
+
+    def prepare(self):
+        p = self.params
+        bars, n = self.bars, len(self.bars)
+        asia_start = p.get("asia_start_hour", 0)
+        asia_end = p.get("asia_end_hour", 8)
+        trade_end = p.get("trade_end_hour", 21)
+        csd_mode = p.get("csd_mode", "candle")
+        swing_lookback = p.get("swing_lookback", 5)
+        stop_buffer_atr = p.get("stop_buffer_atr", 0.10)
+        one_per_day = p.get("one_per_day", True)
+        both_sides = p.get("both_sides", False)
+        min_rr = p.get("min_rr", 0.0)
+
+        a = atr(bars, p.get("atr_n", 14))
+
+        start_long = [False] * n
+        start_short = [False] * n
+        stops: List[float] = [float("nan")] * n
+        targets: List[float] = [float("nan")] * n
+
+        hours = [datetime.datetime.utcfromtimestamp(b.t).hour for b in bars]
+        days = [datetime.datetime.utcfromtimestamp(b.t).date() for b in bars]
+
+        i = 0
+        while i < n:
+            j = i
+            while j < n and days[j] == days[i]:
+                j += 1
+
+            asia_idx = [k for k in range(i, j) if asia_start <= hours[k] < asia_end]
+            if not asia_idx:
+                i = j
+                continue
+            asia_high = max(bars[k].h for k in asia_idx)
+            asia_low = min(bars[k].l for k in asia_idx)
+
+            # Per-day state. `swept_*_px` tracks the running extreme reached
+            # since the sweep, which is what the stop hangs off.
+            swept_low = swept_high = False
+            sweep_low_px = float("nan")
+            sweep_high_px = float("nan")
+            last_down_high = float("nan")   # high of the most recent down-close bar
+            last_up_low = float("nan")      # low of the most recent up-close bar
+            taken_long = taken_short = False
+
+            for k in range(i, j):
+                b = bars[k]
+                if hours[k] < asia_end or hours[k] >= trade_end:
+                    # Still inside Asia, or past the cutoff. Keep the CSD
+                    # trackers warm but do not trade.
+                    if b.c < b.o:
+                        last_down_high = b.h
+                    elif b.c > b.o:
+                        last_up_low = b.l
+                    continue
+
+                # --- Step 2: the sweep ---------------------------------
+                if b.l < asia_low:
+                    swept_low = True
+                    sweep_low_px = b.l if sweep_low_px != sweep_low_px else min(sweep_low_px, b.l)
+                if b.h > asia_high:
+                    swept_high = True
+                    sweep_high_px = b.h if sweep_high_px != sweep_high_px else max(sweep_high_px, b.h)
+
+                av = a[k]
+
+                # --- Step 3/4: the CSD, entered on its close -----------
+                # Evaluated against the trackers as they stood BEFORE this
+                # bar, so the bar cannot satisfy its own condition.
+                if csd_mode == "swing":
+                    lo_k = max(i, k - swing_lookback)
+                    ref_high = max((bars[m].h for m in range(lo_k, k)), default=float("nan"))
+                    ref_low = min((bars[m].l for m in range(lo_k, k)), default=float("nan"))
+                else:
+                    ref_high = last_down_high
+                    ref_low = last_up_low
+
+                can_long = swept_low and not (taken_long or (one_per_day and taken_short))
+                can_short = swept_high and not (taken_short or (one_per_day and taken_long))
+                if not both_sides:
+                    # Default: only the first side to sweep is tradeable.
+                    if swept_low and swept_high:
+                        can_long = can_long and not taken_short
+                        can_short = can_short and not taken_long
+
+                if (can_long and av == av and av > 0
+                        and ref_high == ref_high and b.c > ref_high):
+                    entry = b.c
+                    stop = sweep_low_px - stop_buffer_atr * av
+                    target = asia_high
+                    risk, reward = entry - stop, target - entry
+                    if risk > 0 and reward > 0 and (min_rr <= 0 or reward / risk >= min_rr):
+                        start_long[k] = True
+                        stops[k], targets[k] = stop, target
+                        taken_long = True
+                elif (can_short and av == av and av > 0
+                        and ref_low == ref_low and b.c < ref_low):
+                    entry = b.c
+                    stop = sweep_high_px + stop_buffer_atr * av
+                    target = asia_low
+                    risk, reward = stop - entry, entry - target
+                    if risk > 0 and reward > 0 and (min_rr <= 0 or reward / risk >= min_rr):
+                        start_short[k] = True
+                        stops[k], targets[k] = stop, target
+                        taken_short = True
+
+                # Update the trackers AFTER this bar has been judged.
+                if b.c < b.o:
+                    last_down_high = b.h
+                elif b.c > b.o:
+                    last_up_low = b.l
+
+            i = j
+
+        self.start_long = start_long
+        self.start_short = start_short
+        self.stops = stops
+        self.targets = targets
+        # One fixed target, no scale-out: the transcript names a single
+        # destination (the opposite Asia level), so inventing a partial exit
+        # would change the payoff into something he never described.
+        self.partial_at_tp1 = False
+
+        positions = ["FLAT"] * n
+        pos = "FLAT"
+        for k in range(n):
+            if start_long[k]:
+                pos = "LONG"
+            elif start_short[k]:
+                pos = "SHORT"
+            positions[k] = pos
+        self.positions = positions
+
+    def decide(self, i):
+        return self.positions[i]
+
+    def to_pine(self):
+        return ("// Full Pine Script v6 source: see pine/asia_sweep.pine in this\n"
+                "// repo. It is a strategy(), so TradingView's Strategy Tester\n"
+                "// backtests it on real intraday data -- which this one needs,\n"
+                "// since the sample data here is daily and the session logic\n"
+                "// degenerates on it. Inputs mirror this class one-for-one.\n")
+
+
 REGISTRY = {
     "sma": SMACrossover,
     "rsi": RSIMeanReversion,
@@ -1163,6 +1361,7 @@ REGISTRY = {
     "lorentzian": LorentzianClassification,
     "sdz": SupplyDemandStructure,
     "nowick": NoWickRetrace,
+    "asiasweep": AsiaSweepCSD,
 }
 
 

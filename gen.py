@@ -70,6 +70,15 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
                 f"Long when close < lower band and RSI < {ov}; exit when RSI > {ob} or close > upper band.")
         return "bollrsi", params, expl
 
+    # ---- Asia sweep + CSD -- before po3, which also matches "asia" ----
+    if ("asia" in t and ("sweep" in t or "csd" in t or "delivery" in t)) or "asiasweep" in t:
+        params = {"csd_mode": "candle", "stop_buffer_atr": 0.10, "one_per_day": True}
+        expl = ("Matched ASIA SWEEP + CSD. Mark the Asian range, wait for a sweep "
+                "of one side, enter on a change in the state of delivery back the "
+                "other way, target the opposite side. Run with --bracket; needs "
+                "intraday bars with UTC timestamps.")
+        return "asiasweep", params, expl
+
     # ---- No Wick retrace (@bardfx) -- before the generic "structure" match ----
     if "no wick" in t or "nowick" in t or "wickless" in t or "no-wick" in t:
         params = {"rr": 1.0, "trend_mode": "structure", "stop_mode": "candle",

@@ -36,6 +36,10 @@ PARAM_GRIDS: Dict[str, Dict[str, list]] = {
     "lorentzian": {"neighbors": [5, 8, 12], "max_bars_back": [1000, 2000]},
     "sdz": {"min_rr": [2.0, 2.5, 3.0], "pivot_lookback": [3, 5, 8],
             "impulse_atr": [1.5, 2.0, 3.0]},
+    # min_rr is the input most likely to move these results: the target is a
+    # fixed level, so each setup's R:R is whatever the range geometry gives.
+    "asiasweep": {"csd_mode": ["candle", "swing"], "stop_buffer_atr": [0.0, 0.1, 0.25],
+                  "min_rr": [0.0, 1.5, 3.0], "asia_end_hour": [7, 8, 9]},
     # wick_tol_frac matters most on forex, where an exactly-zero wick is rare
     # -- see the timeframe warning in NoWickRetrace's docstring.
     "nowick": {"rr": [1.0, 1.5, 2.0], "stop_buffer_atr": [0.25, 0.5, 1.0],
@@ -57,7 +61,7 @@ def is_bracket_strategy(strategy_key: str) -> bool:
     cls = REGISTRY.get(strategy_key)
     if cls is None:
         return False
-    return hasattr(cls, "prepare") and strategy_key in ("sdz", "nowick")
+    return hasattr(cls, "prepare") and strategy_key in ("sdz", "nowick", "asiasweep")
 
 
 def _bracket_report(strategy_key: str, bars: List[Bar], params: dict) -> BracketReport:

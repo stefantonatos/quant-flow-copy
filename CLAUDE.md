@@ -166,6 +166,39 @@ costs" is a different finding from "no edge"), and **check how TradingView's bro
 emulator resolves a bar containing both the stop and the target** — unverified, and with
 this geometry most trades will hit that case. Bar Magnifier is what actually resolves it.
 
+## Update (2026-08-16, later): third video strategy — `asiasweep`
+
+Stefan sent a transcript: mark the Asian session high/low (Leviathan's Market Sessions
+indicator, **confirmed UTC from a screenshot**), wait for a sweep of one side, drop to 5m
+for a "change in state of delivery", enter on that candle's close, target the **opposite**
+Asia level. Built as `AsiaSweepCSD` / key `asiasweep`, plus `pine/asia_sweep.pine`.
+
+**The "3RR" in the transcript is not a rule and the code cannot make it one.** The target
+is a fixed price (the other side of the range) and the stop is below the sweep, so each
+setup's R:R is whatever that day's geometry gives — the synthetic test fixture yields
+1.86R. `min_rr` exists to filter, defaults to **0.0** so nothing is silently dropped.
+Don't quietly "fix" this into a 3R target; that would be a different strategy.
+
+**Asked him the three open questions; he answered "idk" to two of them.** Per the rule at
+the top of this file, that is the signal to decide and explain rather than push back with
+more questions. Decisions, all exposed as parameters: `csd_mode="candle"` (first close back
+above the most recent down-close bar's high — the standard ICT reading), stop below the
+sweep extreme (**this one he did specify**), `one_per_day=True`, Asia 00:00–08:00 UTC.
+Session hours are still unconfirmed against his indicator — every level hangs off them, so
+confirm before trusting output.
+
+**It overlaps `po3` but is genuinely distinct** — po3 enters on a close back inside the
+range and targets a fixed R multiple; this enters on a CSD and targets the opposite level.
+`gen.py` routes "asia"+"sweep/csd/delivery" here and leaves "power of 3"/"po3" on po3;
+`test_power_of_three_still_routes` guards that.
+
+**Needs intraday bars with UTC timestamps.** On the daily sample data every bar lands in
+hour 0, the session logic degenerates, and it produces nothing — expected, not a bug. The
+tests build synthetic 5-minute days for this reason. TradingView is where it gets measured.
+
+Test counts now **`selftest.py` 81, `test_engine.py` 13**. `asiasweep` was added to
+`opt.is_bracket_strategy()`.
+
 **Still nothing validated.** Every number above is synthetic random-walk sample data
 (`data.py`), which has no market structure — smoke tests that the pipeline runs, not
 measurements of edge. Both new strategies fire only a handful of trades on it. The real

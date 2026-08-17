@@ -1,0 +1,258 @@
+//@version=6
+// ============================================================================
+// ==== ASIA SWEEP + CHANGE IN STATE OF DELIVERY ==============================
+// ============================================================================
+//
+// From a video transcript. The rules as stated:
+//
+//   1. Mark the Asian session high and low (he uses Leviathan's Market
+//      Sessions indicator; a screenshot confirms it is set to UTC).
+//   2. Wait for price to sweep one side of that range.
+//   3. Drop to the 5-minute chart and wait for a change in the state of
+//      delivery (CSD).
+//   4. Enter on the close of the CSD candle.
+//   5. Target the OPPOSITE Asia level. He calls it a "3RR trade".
+//
+// This is the TradingView twin of AsiaSweepCSD in strategies.py -- same
+// inputs, same defaults, so the two can be compared.
+//
+// ---------------------------------------------------------------------------
+// READ THIS BEFORE BELIEVING THE "3RR"
+// ---------------------------------------------------------------------------
+// The target is a fixed PRICE, not an R multiple. The stop is below the sweep.
+// So the reward-to-risk of any given setup is whatever the distance between
+// those two happens to be on the day -- sometimes 3R, often much less. "3RR"
+// describes the example that was on his screen; it is not a rule the strategy
+// enforces, and nothing here can make it one.
+//
+// `minRR` lets you require a minimum. It defaults to 0 (take everything) so
+// that trades are not being silently filtered out by a rule he never stated.
+// Turning it up will raise the average R and cut the number of trades; whether
+// that is an improvement is a question for the Strategy Tester, not for me.
+//
+// ---------------------------------------------------------------------------
+// WHAT HE DID NOT DEFINE, AND WHAT I CHOSE
+// ---------------------------------------------------------------------------
+// "Change in state of delivery" was never defined, and when asked, Stefan said
+// he didn't know either. So it is an input:
+//
+//   "candle" (default) -- the standard ICT reading: the first bar that CLOSES
+//                         back above the high of the most recent down-close
+//                         bar (mirrored for shorts). Tight and unambiguous.
+//   "swing"            -- looser: a close beyond the extreme of the last N
+//                         bars, i.e. a small break of structure.
+//
+// Put it on a chart, look at where the triangles land, and pick whichever one
+// matches what you actually mark by hand. That is a faster way to settle this
+// than any amount of describing it in words.
+//
+// SESSION TIMES ARE A GUESS UNTIL CONFIRMED. Default 00:00-08:00 UTC. Check
+// what the Leviathan indicator is actually set to and match it, because every
+// level in this script hangs off that one range.
+//
+// SET COMMISSION AND SLIPPAGE before reading any result.
+// ============================================================================
+
+strategy("Asia Sweep CSD", shorttitle="AsiaCSD", overlay=true,
+         max_lines_count=500, max_boxes_count=500, max_labels_count=500,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+         commission_type=strategy.commission.percent, commission_value=0.0,
+         slippage=1, initial_capital=10000, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=false)
+
+// ==================
+// ==== Inputs ======
+// ==================
+
+grpSess  = "Session"
+grpEntry = "Entry"
+grpTrade = "Trade Geometry"
+grpDisp  = "Display"
+
+asiaSess = input.session("0000-0800", "Asia Session", group=grpSess,
+     tooltip="Must match whatever your sessions indicator is drawing. Every level in this script is derived from this range, so if it is wrong, everything is wrong.")
+sessTZ   = input.string("UTC", "Session Timezone", group=grpSess,
+     tooltip="The Leviathan indicator screenshot shows UTC. Change only if yours is set differently.")
+tradeSess = input.session("0800-2100", "Trading Window", group=grpSess,
+     tooltip="When setups may trigger. Starts when Asia ends.")
+
+csdMode = input.string("candle", "Change in State of Delivery", options=["candle", "swing"], group=grpEntry,
+     tooltip="candle = first close back above the high of the most recent down-close bar (standard ICT reading). swing = a close beyond the extreme of the last N bars, a small break of structure.")
+swingLookback = input.int(5, "Swing Lookback (swing mode)", minval=1, group=grpEntry)
+onePerDay = input.bool(true, "One trade per day", group=grpEntry)
+
+stopBufferATR = input.float(0.10, "Stop Buffer beyond the sweep (x ATR)", minval=0, step=0.05, group=grpTrade,
+     tooltip="The stop goes below the wick that swept the level. This is padding beyond it.")
+minRR  = input.float(0.0, "Minimum Reward:Risk (0 = take everything)", minval=0, step=0.5, group=grpTrade,
+     tooltip="The target is a fixed level, so R:R varies by setup. 0 takes every valid setup, which is what the transcript actually describes.")
+atrLen = input.int(14, "ATR Length", minval=1, group=grpTrade)
+
+showRange = input.bool(true, "Show Asia range", group=grpDisp)
+showBracket = input.bool(true, "Show stop/target on entry", group=grpDisp)
+bullColor = input.color(#089981, "Bullish", group=grpDisp)
+bearColor = input.color(#F23645, "Bearish", group=grpDisp)
+
+// ==========================================
+// ==== Indicators -- global scope only =====
+// ==========================================
+
+atrVal = ta.atr(atrLen)
+
+inAsia  = not na(time(timeframe.period, asiaSess, sessTZ))
+inTrade = not na(time(timeframe.period, tradeSess, sessTZ))
+
+// ta.highest/ta.lowest must run every bar or their state corrupts -- a trap
+// already hit once in this repo (see CLAUDE.md).
+swingHi = ta.highest(high, swingLookback)
+swingLo = ta.lowest(low, swingLookback)
+
+// ==========================================
+// ==== Step 1: build the Asia range ========
+// ==========================================
+
+var float asiaHigh = na
+var float asiaLow  = na
+var float liveHigh = na
+var float liveLow  = na
+
+asiaStarted = inAsia and not inAsia[1]
+
+if asiaStarted
+    liveHigh := high
+    liveLow  := low
+else if inAsia
+    liveHigh := math.max(nz(liveHigh, high), high)
+    liveLow  := math.min(nz(liveLow, low), low)
+
+// The range is only usable once the session has CLOSED. Publishing it while
+// Asia is still printing would let the strategy trade a level that is still
+// moving -- which is lookahead dressed up as a session filter.
+if not inAsia and inAsia[1]
+    asiaHigh := liveHigh
+    asiaLow  := liveLow
+
+// ==========================================
+// ==== Per-day state =======================
+// ==========================================
+
+var bool  sweptLow    = false
+var bool  sweptHigh   = false
+var float sweepLowPx  = na
+var float sweepHighPx = na
+var float lastDownHigh = na
+var float lastUpLow    = na
+var bool  tookLong    = false
+var bool  tookShort   = false
+
+// Reset everything when a new Asia session begins.
+if asiaStarted
+    sweptLow    := false
+    sweptHigh   := false
+    sweepLowPx  := na
+    sweepHighPx := na
+    tookLong    := false
+    tookShort   := false
+
+// ==========================================
+// ==== Step 2: the sweep ===================
+// ==========================================
+
+canTrade = inTrade and not inAsia and not na(asiaHigh) and not na(asiaLow) and
+     not na(atrVal) and atrVal > 0
+
+if canTrade
+    if low < asiaLow
+        sweptLow   := true
+        sweepLowPx := na(sweepLowPx) ? low : math.min(sweepLowPx, low)
+    if high > asiaHigh
+        sweptHigh   := true
+        sweepHighPx := na(sweepHighPx) ? high : math.max(sweepHighPx, high)
+
+// ==========================================
+// ==== Steps 3-5: CSD, entry, target =======
+// ==========================================
+// The reference levels are the ones as they stood BEFORE this bar, so a bar
+// can never satisfy its own condition. The trackers are updated at the very
+// bottom of the script for exactly that reason.
+
+refHigh = csdMode == "swing" ? swingHi[1] : lastDownHigh
+refLow  = csdMode == "swing" ? swingLo[1] : lastUpLow
+
+var float restStop   = na
+var float restTarget = na
+
+blocked = onePerDay and (tookLong or tookShort)
+
+longSignal = (canTrade and sweptLow and not blocked and not na(refHigh) and
+     close > refHigh)
+shortSignal = (canTrade and sweptHigh and not blocked and not na(refLow) and
+     close < refLow)
+
+if longSignal
+    st = nz(sweepLowPx, low) - stopBufferATR * atrVal
+    risk = close - st
+    reward = asiaHigh - close
+    if risk > 0 and reward > 0 and (minRR <= 0 or reward / risk >= minRR)
+        restStop   := st
+        restTarget := asiaHigh
+        tookLong   := true
+        strategy.entry("Asia Long", strategy.long)
+        strategy.exit("Asia Long X", from_entry="Asia Long", stop=st, limit=asiaHigh)
+else if shortSignal
+    st = nz(sweepHighPx, high) + stopBufferATR * atrVal
+    risk = st - close
+    reward = close - asiaLow
+    if risk > 0 and reward > 0 and (minRR <= 0 or reward / risk >= minRR)
+        restStop   := st
+        restTarget := asiaLow
+        tookShort  := true
+        strategy.entry("Asia Short", strategy.short)
+        strategy.exit("Asia Short X", from_entry="Asia Short", stop=st, limit=asiaLow)
+
+// ==================
+// ==== Drawing =====
+// ==================
+
+plot(showRange and not na(asiaHigh) ? asiaHigh : na, title="Asia High",
+     color=color.new(bullColor, 20), style=plot.style_linebr, linewidth=1)
+plot(showRange and not na(asiaLow) ? asiaLow : na, title="Asia Low",
+     color=color.new(bearColor, 20), style=plot.style_linebr, linewidth=1)
+
+bgcolor(inAsia and showRange ? color.new(color.blue, 92) : na, title="Asia session")
+
+justOpened = strategy.position_size != 0 and strategy.position_size[1] == 0
+if justOpened and showBracket
+    lc = strategy.position_size > 0 ? bullColor : bearColor
+    line.new(bar_index, strategy.position_avg_price, bar_index + 24, strategy.position_avg_price, color=lc, width=2)
+    line.new(bar_index, restStop, bar_index + 24, restStop, color=color.new(color.red, 30), style=line.style_dashed)
+    line.new(bar_index, restTarget, bar_index + 24, restTarget, color=color.new(color.green, 30), style=line.style_dashed)
+
+plotshape(longSignal, title="CSD long", style=shape.triangleup,
+          location=location.belowbar, color=bullColor, size=size.tiny)
+plotshape(shortSignal, title="CSD short", style=shape.triangledown,
+          location=location.abovebar, color=bearColor, size=size.tiny)
+
+// ==================
+// ==== Alerts ======
+// ==================
+// alert(), not alertcondition() -- the latter is silently inert inside a
+// strategy(). Create these with the "Any alert() function call" condition.
+
+if longSignal
+    alert("Asia Sweep: long CSD on " + syminfo.ticker + " " + timeframe.period,
+          alert.freq_once_per_bar_close)
+if shortSignal
+    alert("Asia Sweep: short CSD on " + syminfo.ticker + " " + timeframe.period,
+          alert.freq_once_per_bar_close)
+
+// ==========================================
+// ==== Tracker update -- MUST BE LAST ======
+// ==========================================
+// Updated after the bar has been judged, so the CSD reference is always the
+// PREVIOUS down/up-close bar rather than this one. Moving this higher would
+// let a single bar be both the reference and the trigger.
+
+if close < open
+    lastDownHigh := high
+else if close > open
+    lastUpLow := low

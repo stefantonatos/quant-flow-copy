@@ -1042,5 +1042,193 @@ class TestBracketOptimizer(unittest.TestCase):
             self.assertAlmostEqual(reward / t.risk, 2.0, places=6)
 
 
+# ---------------------------------------------------------------------------
+# Asia sweep + change in state of delivery
+# ---------------------------------------------------------------------------
+_UTC_MIDNIGHT = 1755000000 // 86400 * 86400
+
+
+def _m5(k, o, h, l, c, day=0):
+    """One 5-minute bar, k bars after a UTC midnight. The session logic keys
+    off real UTC timestamps, so these cannot be faked with bare indices."""
+    return Bar(t=_UTC_MIDNIGHT + day * 86400 + k * 300, o=o, h=h, l=l, c=c, v=1.0)
+
+
+def _asia_day(sweep="low", with_csd=True, day=0, rally=60):
+    """A synthetic UTC day: an Asia range of 100.0-102.0, then a sweep of one
+    side after 08:00, then (optionally) a change in state of delivery back
+    the other way. Returns (bars, asia_high, asia_low)."""
+    bars, k = [], 0
+    for _ in range(96):                      # 00:00-08:00 UTC = Asia
+        mid = 101.0 + (0.6 if k % 2 else -0.6)
+        bars.append(_m5(k, 101.0, max(101.0, mid) + 0.4, min(101.0, mid) - 0.4, mid, day))
+        k += 1
+    asia_high = max(b.h for b in bars)
+    asia_low = min(b.l for b in bars)
+
+    px = 101.0
+    if sweep == "low":
+        for _ in range(8):                   # drive down through the Asia low
+            o = px; c = px - 0.35
+            bars.append(_m5(k, o, o + 0.05, c - 0.05, c, day)); k += 1
+            px = c
+        if with_csd:                         # close above the last red candle's high
+            ref = bars[-1].h
+            bars.append(_m5(k, px, ref + 0.9, px - 0.1, ref + 0.8, day)); k += 1
+            px = ref + 0.8
+        step = 0.09
+    elif sweep == "high":
+        for _ in range(8):
+            o = px; c = px + 0.35
+            bars.append(_m5(k, o, c + 0.05, o - 0.05, c, day)); k += 1
+            px = c
+        if with_csd:                         # close below the last green candle's low
+            ref = bars[-1].l
+            bars.append(_m5(k, px, px + 0.1, ref - 0.9, ref - 0.8, day)); k += 1
+            px = ref - 0.8
+        step = -0.09
+    else:                                    # "none": stay inside the range
+        for _ in range(8):
+            bars.append(_m5(k, px, px + 0.1, px - 0.1, px, day)); k += 1
+        step = 0.0
+
+    for _ in range(rally):
+        o = px; c = px + step
+        bars.append(_m5(k, o, max(o, c) + 0.05, min(o, c) - 0.05, c, day)); k += 1
+        px = c
+    return bars, asia_high, asia_low
+
+
+class TestAsiaSweepCSD(unittest.TestCase):
+
+    def test_registered_and_routed(self):
+        from strategies import REGISTRY
+        from gen import plan_from_text
+        self.assertIn("asiasweep", REGISTRY)
+        self.assertEqual(plan_from_text("asia sweep")[0], "asiasweep")
+        self.assertEqual(plan_from_text("asia liquidity sweep csd")[0], "asiasweep")
+
+    def test_power_of_three_still_routes(self):
+        """`po3` also marks the Asian range. Adding this one must not steal
+        its keywords -- they are different strategies."""
+        from gen import plan_from_text
+        self.assertEqual(plan_from_text("power of 3")[0], "po3")
+        self.assertEqual(plan_from_text("po3")[0], "po3")
+
+    def test_sweep_of_asia_low_gives_a_long_targeting_asia_high(self):
+        from strategies import AsiaSweepCSD
+        bars, asia_high, asia_low = _asia_day(sweep="low")
+        s = AsiaSweepCSD(bars=bars, params={})
+        self.assertEqual(sum(s.start_long), 1)
+        self.assertEqual(sum(s.start_short), 0)
+        i = s.start_long.index(True)
+        self.assertAlmostEqual(s.targets[i], asia_high, places=9,
+                               msg="target is the OPPOSITE side of the Asia range")
+        self.assertLess(s.stops[i], asia_low,
+                        "stop sits below the sweep, which is itself below Asia low")
+        self.assertAlmostEqual(bars[i].c, bars[i].c)   # entry is the CSD bar's close
+
+    def test_sweep_of_asia_high_gives_a_short_targeting_asia_low(self):
+        from strategies import AsiaSweepCSD
+        bars, asia_high, asia_low = _asia_day(sweep="high")
+        s = AsiaSweepCSD(bars=bars, params={})
+        self.assertEqual(sum(s.start_short), 1)
+        self.assertEqual(sum(s.start_long), 0)
+        i = s.start_short.index(True)
+        self.assertAlmostEqual(s.targets[i], asia_low, places=9)
+        self.assertGreater(s.stops[i], asia_high)
+
+    def test_no_sweep_means_no_trade(self):
+        """Step 2 is a precondition, not a preference. Price staying inside
+        the Asia range must produce nothing at all."""
+        from strategies import AsiaSweepCSD
+        bars, _, _ = _asia_day(sweep="none")
+        s = AsiaSweepCSD(bars=bars, params={})
+        self.assertEqual(sum(s.start_long) + sum(s.start_short), 0)
+
+    def test_sweep_without_a_csd_means_no_trade(self):
+        """The sweep alone is not the signal -- without the shift back the
+        other way this is just a market going down."""
+        from strategies import AsiaSweepCSD
+        bars, _, _ = _asia_day(sweep="low", with_csd=False, rally=0)
+        s = AsiaSweepCSD(bars=bars, params={})
+        self.assertEqual(sum(s.start_long), 0)
+
+    def test_nothing_triggers_during_the_asia_session_itself(self):
+        from strategies import AsiaSweepCSD
+        bars, _, _ = _asia_day(sweep="low")
+        s = AsiaSweepCSD(bars=bars, params={})
+        import datetime as _dt
+        for i in range(len(bars)):
+            if s.start_long[i] or s.start_short[i]:
+                hr = _dt.datetime.utcfromtimestamp(bars[i].t).hour
+                self.assertGreaterEqual(hr, 8, "no entry may fire inside Asia")
+
+    def test_one_trade_per_day(self):
+        from strategies import AsiaSweepCSD
+        bars, _, _ = _asia_day(sweep="low", rally=120)
+        s = AsiaSweepCSD(bars=bars, params={"one_per_day": True})
+        self.assertEqual(sum(s.start_long) + sum(s.start_short), 1)
+
+    def test_min_rr_filter_skips_a_setup_that_does_not_reach_it(self):
+        """The transcript calls it a "3RR trade", but the target is a fixed
+        LEVEL, so the real R:R is whatever the range geometry gives. This
+        fixture offers about 1.9R -- it must be taken at min_rr 1.5 and
+        skipped at 3.0, or the filter is decorative."""
+        from strategies import AsiaSweepCSD
+        bars, _, _ = _asia_day(sweep="low")
+        loose = AsiaSweepCSD(bars=bars, params={"min_rr": 1.5})
+        strict = AsiaSweepCSD(bars=bars, params={"min_rr": 3.0})
+        self.assertEqual(sum(loose.start_long), 1)
+        self.assertEqual(sum(strict.start_long), 0)
+        i = loose.start_long.index(True)
+        rr = (loose.targets[i] - bars[i].c) / (bars[i].c - loose.stops[i])
+        self.assertGreater(rr, 1.5)
+        self.assertLess(rr, 3.0)
+
+    def test_a_wider_stop_buffer_lowers_the_realized_rr(self):
+        """Sanity on the one geometry knob: the target is fixed, so widening
+        the stop can only reduce reward-to-risk."""
+        from strategies import AsiaSweepCSD
+        bars, _, _ = _asia_day(sweep="low")
+        tight = AsiaSweepCSD(bars=bars, params={"stop_buffer_atr": 0.0})
+        wide = AsiaSweepCSD(bars=bars, params={"stop_buffer_atr": 0.5})
+        it, iw = tight.start_long.index(True), wide.start_long.index(True)
+        self.assertLess(wide.stops[iw], tight.stops[it])
+
+    def test_every_signal_carries_a_stop_and_a_target(self):
+        """brackets.py reads these in parallel; a NaN at a signal bar would
+        silently fall back to an ATR stop and score a different strategy."""
+        from strategies import AsiaSweepCSD
+        bars, _, _ = _asia_day(sweep="low")
+        s = AsiaSweepCSD(bars=bars, params={})
+        for i in range(len(bars)):
+            if s.start_long[i] or s.start_short[i]:
+                self.assertEqual(s.stops[i], s.stops[i])
+                self.assertEqual(s.targets[i], s.targets[i])
+
+    def test_runs_through_the_bracket_engine_with_its_own_levels(self):
+        from strategies import AsiaSweepCSD
+        from brackets import run_brackets
+        bars, _, _ = _asia_day(sweep="low")
+        s = AsiaSweepCSD(bars=bars, params={})
+        rep = run_brackets(bars, s.start_long, s.start_short,
+                           stops=s.stops, targets=s.targets,
+                           partial_at_tp1=s.partial_at_tp1)
+        self.assertGreater(rep.n, 0)
+        for t in rep.trades:
+            self.assertAlmostEqual(t.stop0, s.stops[t.entry_i], places=9)
+            self.assertAlmostEqual(t.tp2, s.targets[t.entry_i], places=9)
+            self.assertFalse(t.partial, "one fixed target, no scale-out")
+
+    def test_multiple_days_each_get_their_own_range(self):
+        from strategies import AsiaSweepCSD
+        d0, _, _ = _asia_day(sweep="low", day=0)
+        d1, _, _ = _asia_day(sweep="high", day=1)
+        s = AsiaSweepCSD(bars=d0 + d1, params={})
+        self.assertEqual(sum(s.start_long), 1, "day 0 sweeps the low -> one long")
+        self.assertEqual(sum(s.start_short), 1, "day 1 sweeps the high -> one short")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
