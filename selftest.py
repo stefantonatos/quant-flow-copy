@@ -1293,6 +1293,87 @@ class TestFVG(unittest.TestCase):
         self.assertEqual(len(fvgs(bars, min_size=1.0)), 0)
 
 
+class TestCSVTimestamps(unittest.TestCase):
+    """Real exports do not hand you epoch integers.
+
+    Before this worked, every dated CSV loaded with NaN timestamps -- and a
+    NaN timestamp fails SILENTLY: the session strategies just report no
+    setups, which is indistinguishable from a market that genuinely had
+    none. This is the gate every piece of real data has to pass through, so
+    it gets tested at the formats real exports actually use.
+    """
+
+    def _load(self, body):
+        import tempfile, os
+        import data as D
+        p = tempfile.mktemp(suffix=".csv")
+        with open(p, "w") as f:
+            f.write(body)
+        try:
+            return D.load_csv(p)
+        finally:
+            os.unlink(p)
+
+    def test_real_export_formats_all_parse(self):
+        import datetime
+        expect = datetime.datetime(2025, 7, 1, 9, 5,
+                                   tzinfo=datetime.timezone.utc).timestamp()
+        cases = {
+            "tradingview_iso":
+                "time,open,high,low,close,Volume\n2025-07-01T09:05:00Z,1.1,1.2,1.05,1.15,100\n",
+            "tradingview_epoch":
+                f"time,open,high,low,close,Volume\n{int(expect)},1.1,1.2,1.05,1.15,100\n",
+            "dukascopy_gmt":
+                "Gmt time,Open,High,Low,Close,Volume\n01.07.2025 09:05:00.000,1.1,1.2,1.05,1.15,100\n",
+            "metatrader":
+                "Date,Open,High,Low,Close,Volume\n2025.07.01 09:05,1.1,1.2,1.05,1.15,100\n",
+            "epoch_millis":
+                f"timestamp,open,high,low,close,volume\n{int(expect)*1000},1.1,1.2,1.05,1.15,100\n",
+            "iso_with_offset":
+                "time,open,high,low,close,volume\n2025-07-01 09:05:00+00:00,1.1,1.2,1.05,1.15,100\n",
+        }
+        for name, body in cases.items():
+            with self.subTest(fmt=name):
+                bars = self._load(body)
+                self.assertEqual(len(bars), 1)
+                self.assertAlmostEqual(bars[0].t, expect, places=3,
+                                       msg=f"{name} did not parse to the right UTC instant")
+                self.assertAlmostEqual(bars[0].c, 1.15)
+
+    def test_naive_times_are_treated_as_utc(self):
+        """Dukascopy's column is literally 'Gmt time'. Interpreting it as
+        local would shift every session boundary in the repo."""
+        import datetime
+        bars = self._load("Gmt time,Open,High,Low,Close,Volume\n"
+                          "01.07.2025 00:00:00.000,1,1,1,1,1\n")
+        self.assertEqual(
+            datetime.datetime.utcfromtimestamp(bars[0].t).hour, 0)
+
+    def test_ohlc_columns_are_case_insensitive(self):
+        bars = self._load("Time,OPEN,High,low,Close,VOLUME\n"
+                          "2025-07-01T00:00:00Z,1,2,0.5,1.5,10\n")
+        self.assertAlmostEqual(bars[0].o, 1)
+        self.assertAlmostEqual(bars[0].h, 2)
+        self.assertAlmostEqual(bars[0].l, 0.5)
+        self.assertAlmostEqual(bars[0].c, 1.5)
+
+    def test_intraday_csv_drives_a_session_strategy_end_to_end(self):
+        """The whole point: a dated intraday CSV must reach asiasweep with
+        usable UTC hours, not NaN."""
+        import datetime
+        from strategies import AsiaSweepCSD
+        rows = ["time,open,high,low,close,volume"]
+        base = datetime.datetime(2025, 7, 1, tzinfo=datetime.timezone.utc)
+        for i in range(288):                       # one full UTC day of 5m bars
+            ts = (base + datetime.timedelta(minutes=5 * i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            rows.append(f"{ts},100,101,99,100,1")
+        bars = self._load("\n".join(rows) + "\n")
+        self.assertTrue(all(b.t == b.t for b in bars))
+        hours = {datetime.datetime.utcfromtimestamp(b.t).hour for b in bars}
+        self.assertEqual(len(hours), 24, "a full day must span 24 distinct UTC hours")
+        AsiaSweepCSD(bars=bars, params={})   # must not raise
+
+
 class TestSMTDivergence(unittest.TestCase):
     """Two correlated instruments disagreeing at an extreme -- NQ sweeps its
     high, ES does not follow."""
