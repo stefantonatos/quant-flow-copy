@@ -46,9 +46,14 @@
 // matches what you actually mark by hand. That is a faster way to settle this
 // than any amount of describing it in words.
 //
-// SESSION TIMES ARE A GUESS UNTIL CONFIRMED. Default 00:00-08:00 UTC. Check
-// what the Leviathan indicator is actually set to and match it, because every
-// level in this script hangs off that one range.
+// SESSION TIMES ARE CONFIRMED, not guessed. A screenshot of Stefan's Leviathan
+// Market Sessions panel shows Tokyo 00:00-09:00, London 07:00-16:00, New York
+// 13:00-22:00, Sydney 21:00-06:00 (unticked). His "Asia" is the Tokyo block, so
+// the default here is 00:00-09:00 UTC. An earlier default of 00:00-08:00 was
+// wrong by an hour and produced a narrower range than his chart shows.
+//
+// If you run this against a different sessions setup, match that one instead --
+// every level in this script hangs off this single range.
 //
 // SET COMMISSION AND SLIPPAGE before reading any result.
 // ============================================================================
@@ -69,12 +74,12 @@ grpEntry = "Entry"
 grpTrade = "Trade Geometry"
 grpDisp  = "Display"
 
-asiaSess = input.session("0000-0800", "Asia Session", group=grpSess,
-     tooltip="Must match whatever your sessions indicator is drawing. Every level in this script is derived from this range, so if it is wrong, everything is wrong.")
+asiaSess = input.session("0000-0900", "Asia Session", group=grpSess,
+     tooltip="CONFIRMED against Stefan's Leviathan Market Sessions settings: his Asia is the Tokyo block, 00:00-09:00 UTC. Every level in this script derives from this range, so if it is wrong, everything downstream is wrong.")
 sessTZ   = input.string("UTC", "Session Timezone", group=grpSess,
      tooltip="The Leviathan indicator screenshot shows UTC. Change only if yours is set differently.")
-tradeSess = input.session("0800-2100", "Trading Window", group=grpSess,
-     tooltip="When setups may trigger. Starts when Asia ends.")
+tradeSess = input.session("0900-2100", "Trading Window", group=grpSess,
+     tooltip="When setups may trigger. Starts when Asia closes at 09:00.")
 
 csdMode = input.string("candle", "Change in State of Delivery", options=["candle", "swing"], group=grpEntry,
      tooltip="candle = first close back above the high of the most recent down-close bar (standard ICT reading). swing = a close beyond the extreme of the last N bars, a small break of structure.")

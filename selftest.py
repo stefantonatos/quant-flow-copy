@@ -1056,10 +1056,10 @@ def _m5(k, o, h, l, c, day=0):
 
 def _asia_day(sweep="low", with_csd=True, day=0, rally=60):
     """A synthetic UTC day: an Asia range of 100.0-102.0, then a sweep of one
-    side after 08:00, then (optionally) a change in state of delivery back
+    side after 09:00, then (optionally) a change in state of delivery back
     the other way. Returns (bars, asia_high, asia_low)."""
     bars, k = [], 0
-    for _ in range(96):                      # 00:00-08:00 UTC = Asia
+    for _ in range(108):                     # 00:00-09:00 UTC = Asia (Tokyo)
         mid = 101.0 + (0.6 if k % 2 else -0.6)
         bars.append(_m5(k, 101.0, max(101.0, mid) + 0.4, min(101.0, mid) - 0.4, mid, day))
         k += 1
@@ -1162,7 +1162,7 @@ class TestAsiaSweepCSD(unittest.TestCase):
         for i in range(len(bars)):
             if s.start_long[i] or s.start_short[i]:
                 hr = _dt.datetime.utcfromtimestamp(bars[i].t).hour
-                self.assertGreaterEqual(hr, 8, "no entry may fire inside Asia")
+                self.assertGreaterEqual(hr, 9, "no entry may fire inside Asia")
 
     def test_one_trade_per_day(self):
         from strategies import AsiaSweepCSD

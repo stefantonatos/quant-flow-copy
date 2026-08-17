@@ -184,8 +184,12 @@ the top of this file, that is the signal to decide and explain rather than push 
 more questions. Decisions, all exposed as parameters: `csd_mode="candle"` (first close back
 above the most recent down-close bar's high — the standard ICT reading), stop below the
 sweep extreme (**this one he did specify**), `one_per_day=True`, Asia 00:00–08:00 UTC.
-Session hours are still unconfirmed against his indicator — every level hangs off them, so
-confirm before trusting output.
+**Session hours are now CONFIRMED** from a screenshot of his Leviathan panel: Tokyo
+00:00–09:00, London 07:00–16:00, New York 13:00–22:00, Sydney 21:00–06:00 (unticked). His
+"Asia" is the **Tokyo** block, so the default is **00:00–09:00 UTC**. The first shipped
+default of 00:00–08:00 was **wrong by an hour** — it built a narrower range than his chart
+shows, which moves the sweep, the entry and the target. Corrected in `pine/asia_sweep.pine`,
+`strategies.py` and the test fixture (which now builds a 9-hour Asia session).
 
 **It overlaps `po3` but is genuinely distinct** — po3 enters on a close back inside the
 range and targets a fixed R multiple; this enters on a CSD and targets the opposite level.

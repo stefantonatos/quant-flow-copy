@@ -1176,8 +1176,9 @@ class AsiaSweepCSD(Strategy):
       beyond the highest high of the last `swing_lookback` bars, i.e. a mini
       break of structure.
     - `one_per_day` -- default True, first valid setup only.
-    - Session hours -- default 00:00-08:00 UTC. Confirm against whatever the
-      Leviathan indicator is actually set to before trusting any result.
+    - Session hours -- default 00:00-09:00 UTC. CONFIRMED from a screenshot of
+      Stefan's Leviathan Market Sessions panel: his Asia block is Tokyo,
+      00:00-09:00. An earlier default of 00:00-08:00 was wrong by an hour.
 
     Stop placement was specified: below the sweep extreme (the wick that took
     the level), plus an ATR buffer.
@@ -1204,7 +1205,9 @@ class AsiaSweepCSD(Strategy):
         p = self.params
         bars, n = self.bars, len(self.bars)
         asia_start = p.get("asia_start_hour", 0)
-        asia_end = p.get("asia_end_hour", 8)
+        # 09:00, not 08:00 -- confirmed against Stefan's Leviathan Market
+        # Sessions settings, where the Asia block is Tokyo 00:00-09:00 UTC.
+        asia_end = p.get("asia_end_hour", 9)
         trade_end = p.get("trade_end_hour", 21)
         csd_mode = p.get("csd_mode", "candle")
         swing_lookback = p.get("swing_lookback", 5)
