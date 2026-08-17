@@ -31,6 +31,23 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
     """
     t = text.lower()
 
+    # ---- Asia sweep + CSD / iFVG -------------------------------------------
+    # MUST come before the Power-of-3 branch below: that one matches the bare
+    # word "amd", so "AMD with iFVG" would otherwise be swallowed by it. These
+    # are different strategies -- po3 enters on a close back inside the range
+    # and targets a fixed R multiple; this enters on a change in the state of
+    # delivery and targets the opposite side of the range.
+    if (("asia" in t and ("sweep" in t or "csd" in t or "delivery" in t))
+            or "asiasweep" in t or "ifvg" in t or "inverse fair value" in t
+            or ("amd" in t.split() and ("fvg" in t or "gap" in t))):
+        mode = "ifvg" if ("ifvg" in t or "inverse fair value" in t or "gap" in t) else "candle"
+        params = {"csd_mode": mode, "stop_buffer_atr": 0.10, "one_per_day": True}
+        expl = (f"Matched ASIA SWEEP + CSD (mode: {mode}). Mark the Asian range, wait "
+                f"for a sweep of one side, enter on a change in the state of delivery "
+                f"back the other way, target the opposite side. Run with --bracket; "
+                f"needs intraday bars with UTC timestamps.")
+        return "asiasweep", params, expl
+
     # ---- Power of 3 / AMD (ICT-style accumulation/manipulation/distribution) ----
     if "power of 3" in t or "po3" in t.split() or "accumulation" in t or "amd" in t.split():
         rr = 2.0
@@ -69,15 +86,6 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
         expl = (f"Matched BOLLINGER + RSI (band {n}, RSI {rn}). "
                 f"Long when close < lower band and RSI < {ov}; exit when RSI > {ob} or close > upper band.")
         return "bollrsi", params, expl
-
-    # ---- Asia sweep + CSD -- before po3, which also matches "asia" ----
-    if ("asia" in t and ("sweep" in t or "csd" in t or "delivery" in t)) or "asiasweep" in t:
-        params = {"csd_mode": "candle", "stop_buffer_atr": 0.10, "one_per_day": True}
-        expl = ("Matched ASIA SWEEP + CSD. Mark the Asian range, wait for a sweep "
-                "of one side, enter on a change in the state of delivery back the "
-                "other way, target the opposite side. Run with --bracket; needs "
-                "intraday bars with UTC timestamps.")
-        return "asiasweep", params, expl
 
     # ---- No Wick retrace (@bardfx) -- before the generic "structure" match ----
     if "no wick" in t or "nowick" in t or "wickless" in t or "no-wick" in t:

@@ -38,8 +38,8 @@ PARAM_GRIDS: Dict[str, Dict[str, list]] = {
             "impulse_atr": [1.5, 2.0, 3.0]},
     # min_rr is the input most likely to move these results: the target is a
     # fixed level, so each setup's R:R is whatever the range geometry gives.
-    "asiasweep": {"csd_mode": ["candle", "swing"], "stop_buffer_atr": [0.0, 0.1, 0.25],
-                  "min_rr": [0.0, 1.5, 3.0], "asia_end_hour": [8, 9, 10]},
+    "asiasweep": {"csd_mode": ["candle", "swing", "ifvg"], "ifvg_entry": ["close", "retest"],
+                  "stop_buffer_atr": [0.0, 0.1, 0.25], "min_rr": [0.0, 1.5, 3.0]},
     # wick_tol_frac matters most on forex, where an exactly-zero wick is rare
     # -- see the timeframe warning in NoWickRetrace's docstring.
     "nowick": {"rr": [1.0, 1.5, 2.0], "stop_buffer_atr": [0.25, 0.5, 1.0],

@@ -203,6 +203,42 @@ tests build synthetic 5-minute days for this reason. TradingView is where it get
 Test counts now **`selftest.py` 81, `test_engine.py` 13**. `asiasweep` was added to
 `opt.is_bracket_strategy()`.
 
+## Update (2026-08-16, later still): iFVG mode — and a lookahead I nearly shipped
+
+Stefan asked for "an AMD with iFVG strategy". **It is not a new strategy.** An inverse-FVG
+inversion *is* a change in the state of delivery — delivery flipping from sell-side to
+buy-side is the same claim at a different resolution — so it went in as a third
+`csd_mode` on `asiasweep` rather than a fourth script. AMD itself is already `po3`.
+
+- `engine.py` gained **`fvgs(bars, min_size)`** — three-bar imbalances, `dir` 1/-1, keyed by
+  the bar they become knowable on. No confirmation lag (unlike pivots): all three bars are
+  closed, so a gap at bar `i` is usable at `i`.
+- `csd_mode="ifvg"` triggers when price closes back through the most recent un-inverted gap
+  of the opposite polarity. `ifvg_entry` picks `"close"` (default, on the inverting bar) or
+  `"retest"` (wait for price to return to the flipped zone).
+
+**⚠️ The retest path had a lookahead bug that I caught only because I probed the numbers
+before writing the test.** The bar whose close inverts a gap necessarily traded *down
+through* that gap on its way up, so filling the retest on that same bar books a price from
+earlier in the bar — before the close that generated the signal existed — and it is always
+the best price of the bar. On the test fixture it turned a genuine **1.86R into a fictional
+3.72R**, i.e. it manufactured exactly the "3RR" the video claims. Fixed by recording an
+`armed_at` bar and requiring `k > armed_at`. Locked by
+`test_retest_cannot_fill_on_the_inversion_bar_itself`. The Pine file carries the same guard
+and the same comment. **Do not "simplify" the armed_at check away.**
+
+The honest post-fix picture, worth repeating to Stefan: on a fixture that rallies straight
+off the inversion the retest **never fills at all** (0 trades), and on one that pulls back
+it fills at 3.75R. That is the real trade-off — a better price you frequently do not get —
+not a free upgrade.
+
+**`gen.py` ordering matters and is now test-locked.** The po3 branch matches the bare word
+`amd`, so it was swallowing "AMD with iFVG". The asiasweep branch now sits *above* po3;
+`test_amd_with_ifvg_routes_here_and_selects_ifvg_mode` and
+`test_power_of_three_still_routes` guard both directions.
+
+Test counts now **`selftest.py` 94, `test_engine.py` 13.**
+
 **Still nothing validated.** Every number above is synthetic random-walk sample data
 (`data.py`), which has no market structure — smoke tests that the pipeline runs, not
 measurements of edge. Both new strategies fire only a handful of trades on it. The real

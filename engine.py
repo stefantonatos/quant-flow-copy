@@ -360,6 +360,36 @@ def confirmed_pivots(bars: List[Bar], left: int = 5, right: int = 5):
     return highs, lows
 
 
+def fvgs(bars: List[Bar], min_size: float = 0.0):
+    """Three-bar fair value gaps (imbalances).
+
+    A bullish FVG exists at bar `i` when bar i's low sits ABOVE bar i-2's
+    high: price moved so fast that the range between them was never traded
+    through. The mirror case is a bearish FVG.
+
+    Returned as dicts: {"i", "dir", "lo", "hi"} with dir 1 = bullish
+    (the zone acts as support), -1 = bearish (resistance).
+
+    CAUSALITY. A gap at bar `i` needs bar `i` to have closed, so it is
+    knowable at `i` and not before -- unlike a pivot, there is no
+    right-hand confirmation lag here, because all three bars are in the
+    past. The `i` field is the bar it becomes usable on, so a caller can
+    consume every gap with `i <= current_bar` and nothing else.
+
+    `min_size` filters out gaps too small to be meaningful; on 5-decimal FX
+    a one-tick gap is noise, not an imbalance.
+    """
+    out = []
+    for i in range(2, len(bars)):
+        gap_up = bars[i].l - bars[i - 2].h
+        gap_dn = bars[i - 2].l - bars[i].h
+        if gap_up > min_size:
+            out.append({"i": i, "dir": 1, "lo": bars[i - 2].h, "hi": bars[i].l})
+        elif gap_dn > min_size:
+            out.append({"i": i, "dir": -1, "lo": bars[i].h, "hi": bars[i - 2].l})
+    return out
+
+
 def normalize01(vals: List[float]) -> List[float]:
     """Running historic min-max normalize to [0, 1] (matches jdehorty's
     MLExtensions `normalize`, used for unbounded features like WT/CCI)."""

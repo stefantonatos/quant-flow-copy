@@ -1054,7 +1054,7 @@ def _m5(k, o, h, l, c, day=0):
     return Bar(t=_UTC_MIDNIGHT + day * 86400 + k * 300, o=o, h=h, l=l, c=c, v=1.0)
 
 
-def _asia_day(sweep="low", with_csd=True, day=0, rally=60):
+def _asia_day(sweep="low", with_csd=True, day=0, rally=60, retest_dip=None):
     """A synthetic UTC day: an Asia range of 100.0-102.0, then a sweep of one
     side after 09:00, then (optionally) a change in state of delivery back
     the other way. Returns (bars, asia_high, asia_low)."""
@@ -1092,6 +1092,13 @@ def _asia_day(sweep="low", with_csd=True, day=0, rally=60):
             bars.append(_m5(k, px, px + 0.1, px - 0.1, px, day)); k += 1
         step = 0.0
 
+    if retest_dip is not None:
+        # One bar that pulls back to `retest_dip` before the move continues.
+        # Used to exercise the iFVG retest path, which otherwise never fills
+        # on a fixture that rallies straight away from the inversion.
+        bars.append(_m5(k, px, px + 0.1, retest_dip, px - 0.1, day)); k += 1
+        px = px - 0.1
+
     for _ in range(rally):
         o = px; c = px + step
         bars.append(_m5(k, o, max(o, c) + 0.05, min(o, c) - 0.05, c, day)); k += 1
@@ -1114,6 +1121,19 @@ class TestAsiaSweepCSD(unittest.TestCase):
         from gen import plan_from_text
         self.assertEqual(plan_from_text("power of 3")[0], "po3")
         self.assertEqual(plan_from_text("po3")[0], "po3")
+        self.assertEqual(plan_from_text("amd")[0], "po3")
+        self.assertEqual(plan_from_text("accumulation manipulation distribution")[0], "po3")
+
+    def test_amd_with_ifvg_routes_here_and_selects_ifvg_mode(self):
+        """"AMD with iFVG" contains the bare word "amd", which the po3 branch
+        matches. Ordering is what keeps it here -- and it must, because the
+        two strategies enter and target completely differently."""
+        from gen import plan_from_text
+        for phrase in ("amd with ifvg", "AMD with iFVG strategy", "ifvg"):
+            with self.subTest(phrase=phrase):
+                key, params, _ = plan_from_text(phrase)
+                self.assertEqual(key, "asiasweep")
+                self.assertEqual(params["csd_mode"], "ifvg")
 
     def test_sweep_of_asia_low_gives_a_long_targeting_asia_high(self):
         from strategies import AsiaSweepCSD
@@ -1228,6 +1248,143 @@ class TestAsiaSweepCSD(unittest.TestCase):
         s = AsiaSweepCSD(bars=d0 + d1, params={})
         self.assertEqual(sum(s.start_long), 1, "day 0 sweeps the low -> one long")
         self.assertEqual(sum(s.start_short), 1, "day 1 sweeps the high -> one short")
+
+
+class TestFVG(unittest.TestCase):
+    """Three-bar fair value gaps -- the primitive the iFVG entry is built on."""
+
+    @staticmethod
+    def _b(t, o, h, l, c):
+        return Bar(t=t, o=o, h=h, l=l, c=c, v=1.0)
+
+    def test_bullish_gap_detected(self):
+        from engine import fvgs
+        # bar 2's low (105) sits above bar 0's high (101): untraded air between.
+        bars = [self._b(0, 100, 101, 99, 100), self._b(1, 101, 106, 100, 105),
+                self._b(2, 105, 108, 105, 107)]
+        g = fvgs(bars)
+        self.assertEqual(len(g), 1)
+        self.assertEqual(g[0]["dir"], 1)
+        self.assertAlmostEqual(g[0]["lo"], 101)
+        self.assertAlmostEqual(g[0]["hi"], 105)
+        self.assertEqual(g[0]["i"], 2, "knowable on the third bar, not before")
+
+    def test_bearish_gap_detected(self):
+        from engine import fvgs
+        bars = [self._b(0, 100, 101, 99, 100), self._b(1, 99, 100, 94, 95),
+                self._b(2, 95, 97, 93, 94)]
+        g = fvgs(bars)
+        self.assertEqual(len(g), 1)
+        self.assertEqual(g[0]["dir"], -1)
+        self.assertAlmostEqual(g[0]["lo"], 97)
+        self.assertAlmostEqual(g[0]["hi"], 99)
+
+    def test_overlapping_bars_have_no_gap(self):
+        from engine import fvgs
+        bars = [self._b(i, 100, 102, 98, 100) for i in range(6)]
+        self.assertEqual(fvgs(bars), [])
+
+    def test_min_size_filters_noise(self):
+        """On 5-decimal FX a one-tick gap is noise, not an imbalance."""
+        from engine import fvgs
+        bars = [self._b(0, 100, 101, 99, 100), self._b(1, 101, 106, 100, 105),
+                self._b(2, 105, 108, 101.5, 107)]
+        self.assertEqual(len(fvgs(bars, min_size=0.0)), 1)
+        self.assertEqual(len(fvgs(bars, min_size=1.0)), 0)
+
+
+class TestAsiaSweepIFVG(unittest.TestCase):
+    """csd_mode="ifvg" -- an inversion IS a change in state of delivery, so
+    this is a third reading of the same idea rather than a new strategy."""
+
+    def test_ifvg_mode_produces_a_trade(self):
+        from strategies import AsiaSweepCSD
+        bars, asia_high, _ = _asia_day(sweep="low")
+        s = AsiaSweepCSD(bars=bars, params={"csd_mode": "ifvg"})
+        self.assertEqual(sum(s.start_long), 1)
+        i = s.start_long.index(True)
+        self.assertAlmostEqual(s.targets[i], asia_high, places=9)
+
+    def test_close_mode_does_not_expose_limit_entries(self):
+        """Entering at the signal bar's close must leave brackets.py on its
+        default, lookahead-free path."""
+        from strategies import AsiaSweepCSD
+        bars, _, _ = _asia_day(sweep="low")
+        s = AsiaSweepCSD(bars=bars, params={"csd_mode": "ifvg"})
+        self.assertFalse(hasattr(s, "entries"))
+        self.assertFalse(getattr(s, "allow_entry_bar_fill", False))
+
+    def test_retest_does_not_fill_when_price_never_comes_back(self):
+        """The honest cost of waiting for a better price: on a fixture that
+        rallies straight off the inversion, the retest simply never fills.
+        A backtest that quietly filled it anyway would be inventing trades."""
+        from strategies import AsiaSweepCSD
+        bars, _, _ = _asia_day(sweep="low")
+        s = AsiaSweepCSD(bars=bars,
+                         params={"csd_mode": "ifvg", "ifvg_entry": "retest"})
+        self.assertEqual(sum(s.start_long) + sum(s.start_short), 0)
+
+    def test_retest_fills_at_the_inverted_zone_edge(self):
+        from strategies import AsiaSweepCSD
+        bars, _, _ = _asia_day(sweep="low", retest_dip=98.80)
+        s = AsiaSweepCSD(bars=bars,
+                         params={"csd_mode": "ifvg", "ifvg_entry": "retest"})
+        self.assertEqual(sum(s.start_long), 1)
+        i = s.start_long.index(True)
+        self.assertTrue(hasattr(s, "entries"))
+        self.assertTrue(s.allow_entry_bar_fill)
+        self.assertLess(s.entries[i], bars[i].c,
+                        "the whole point of the retest is a better price than "
+                        "the close that triggered it")
+
+    def test_retest_price_is_a_limit_not_the_bar_low(self):
+        """Fill at the zone edge, not at however deep the bar happened to
+        dip -- otherwise a deeper wick would silently improve the entry."""
+        from strategies import AsiaSweepCSD
+        shallow, _, _ = _asia_day(sweep="low", retest_dip=98.80)
+        deep, _, _ = _asia_day(sweep="low", retest_dip=98.60)
+        a = AsiaSweepCSD(bars=shallow, params={"csd_mode": "ifvg", "ifvg_entry": "retest"})
+        b = AsiaSweepCSD(bars=deep, params={"csd_mode": "ifvg", "ifvg_entry": "retest"})
+        ia, ib = a.start_long.index(True), b.start_long.index(True)
+        self.assertAlmostEqual(a.entries[ia], b.entries[ib], places=9)
+
+    def test_retest_cannot_fill_on_the_inversion_bar_itself(self):
+        """THE lookahead guard for this mode.
+
+        The bar whose close inverts the gap necessarily traded down through
+        that gap on its way up. Filling the retest there books a price from
+        earlier in the bar -- before the close that generated the signal
+        existed -- and it is always the best price of the bar, so it inflates
+        R substantially. Caught exactly this way during development: the
+        retest was reporting 3.72R against the close entry's 1.86R purely
+        from the lookahead.
+        """
+        from strategies import AsiaSweepCSD
+        bars, _, _ = _asia_day(sweep="low", retest_dip=98.80)
+        close_mode = AsiaSweepCSD(bars=bars, params={"csd_mode": "ifvg"})
+        retest = AsiaSweepCSD(bars=bars,
+                              params={"csd_mode": "ifvg", "ifvg_entry": "retest"})
+        inversion_bar = close_mode.start_long.index(True)
+        fill_bar = retest.start_long.index(True)
+        self.assertGreater(fill_bar, inversion_bar,
+                           "the retest must fill on a LATER bar than the "
+                           "inversion that armed it")
+
+    def test_ifvg_flows_through_the_bracket_engine(self):
+        from strategies import AsiaSweepCSD
+        from brackets import run_brackets
+        bars, _, _ = _asia_day(sweep="low", retest_dip=98.80)
+        s = AsiaSweepCSD(bars=bars,
+                         params={"csd_mode": "ifvg", "ifvg_entry": "retest"})
+        rep = run_brackets(bars, s.start_long, s.start_short,
+                           stops=s.stops, targets=s.targets,
+                           entries=getattr(s, "entries", None),
+                           allow_entry_bar_fill=s.allow_entry_bar_fill,
+                           partial_at_tp1=s.partial_at_tp1)
+        self.assertGreater(rep.n, 0)
+        for t in rep.trades:
+            self.assertAlmostEqual(t.entry_px, s.entries[t.entry_i], places=9)
+            self.assertAlmostEqual(t.stop0, s.stops[t.entry_i], places=9)
 
 
 if __name__ == "__main__":

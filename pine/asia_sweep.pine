@@ -86,9 +86,13 @@ sessTZ   = input.string("UTC", "Session Timezone", group=grpSess,
 tradeSess = input.session("0900-2100", "Trading Window", group=grpSess,
      tooltip="When setups may trigger. Starts when Asia closes at 09:00.")
 
-csdMode = input.string("candle", "Change in State of Delivery", options=["candle", "swing"], group=grpEntry,
-     tooltip="candle = first close back above the high of the most recent down-close bar (standard ICT reading). swing = a close beyond the extreme of the last N bars, a small break of structure.")
+csdMode = input.string("candle", "Change in State of Delivery", options=["candle", "swing", "ifvg"], group=grpEntry,
+     tooltip="candle = first close back above the high of the most recent down-close bar (standard ICT reading). swing = a close beyond the extreme of the last N bars, a small break of structure. ifvg = a bearish fair value gap that price closes back above, flipping it from resistance to support -- an inversion IS a change in state of delivery, which is why it lives here rather than in a separate script.")
 swingLookback = input.int(5, "Swing Lookback (swing mode)", minval=1, group=grpEntry)
+ifvgEntry = input.string("close", "iFVG Entry", options=["close", "retest"], group=grpEntry,
+     tooltip="close = enter on the bar that inverts the gap. retest = wait for price to come back to the flipped zone and enter there. The retest gets a materially better price -- it is where the '3RR' in the video comes from -- but many setups never retrace, so you simply do not get the trade. Neither is free.")
+fvgMinSize = input.float(0.0, "Minimum gap size (price)", minval=0, step=0.00001, group=grpEntry,
+     tooltip="Ignore gaps smaller than this. On 5-decimal FX a one-tick gap is noise, not an imbalance.")
 onePerDay = input.bool(true, "One trade per day", group=grpEntry)
 
 stopBufferATR = input.float(0.10, "Stop Buffer beyond the sweep (x ATR)", minval=0, step=0.05, group=grpTrade,
@@ -170,6 +174,8 @@ if asiaStarted
     sweepHighPx := na
     tookLong    := false
     tookShort   := false
+    pendLongZone  := na
+    pendShortZone := na
 
 // ==========================================
 // ==== Step 2: the sweep ===================
@@ -193,8 +199,24 @@ if canTrade
 // can never satisfy its own condition. The trackers are updated at the very
 // bottom of the script for exactly that reason.
 
-refHigh = csdMode == "swing" ? swingHi[1] : lastDownHigh
-refLow  = csdMode == "swing" ? swingLo[1] : lastUpLow
+// ==========================================
+// ==== Fair value gaps (for ifvg mode) =====
+// ==========================================
+// Three-bar imbalance: a bearish gap exists when this bar's high is below the
+// high-2 bar's low. All three bars are closed, so unlike a pivot there is no
+// confirmation lag to respect. Tracked as "the most recent gap of each
+// polarity that has not yet been inverted".
+
+var float bearFvgLo = na
+var float bearFvgHi = na
+var float bullFvgLo = na
+var float bullFvgHi = na
+
+gapUp = low - high[2]
+gapDn = low[2] - high
+
+refHigh = csdMode == "swing" ? swingHi[1] : csdMode == "ifvg" ? bearFvgHi : lastDownHigh
+refLow  = csdMode == "swing" ? swingLo[1] : csdMode == "ifvg" ? bullFvgLo : lastUpLow
 
 var float restStop   = na
 var float restTarget = na
@@ -204,10 +226,34 @@ var bool  restLong   = false
 
 blocked = onePerDay and (tookLong or tookShort)
 
-longSignal = (canTrade and sweptLow and not blocked and not na(refHigh) and
+invertedLong  = (canTrade and sweptLow and not blocked and not na(refHigh) and
      close > refHigh)
-shortSignal = (canTrade and sweptHigh and not blocked and not na(refLow) and
+invertedShort = (canTrade and sweptHigh and not blocked and not na(refLow) and
      close < refLow)
+
+// In retest mode the inversion only ARMS the trade; the fill waits for price
+// to return to the flipped zone, and may NOT happen on the arming bar. That
+// bar traded down through the gap on its way to closing above it, so filling
+// there books a price from earlier in the same bar -- before the close that
+// produced the signal existed. It is always the best price of the bar, so it
+// inflates R badly. This exact lookahead was caught in the Python twin, where
+// it turned a genuine 1.86R into a fictional 3.72R.
+retestMode = csdMode == "ifvg" and ifvgEntry == "retest"
+
+longSignal  = invertedLong
+shortSignal = invertedShort
+
+if retestMode
+    if invertedLong and na(pendLongZone)
+        pendLongZone := refHigh
+        pendLongBar  := bar_index
+    if invertedShort and na(pendShortZone)
+        pendShortZone := refLow
+        pendShortBar  := bar_index
+    longSignal  := not na(pendLongZone) and bar_index > pendLongBar and
+         low <= pendLongZone and canTrade and not blocked
+    shortSignal := not na(pendShortZone) and bar_index > pendShortBar and
+         high >= pendShortZone and canTrade and not blocked
 
 // ==========================================
 // ==== Trade drawings ======================
@@ -223,6 +269,10 @@ var label tpLbl   = na
 var label slLbl   = na
 var label csdLbl  = na
 var float restRR  = na
+var float pendLongZone  = na
+var float pendShortZone = na
+var int   pendLongBar   = na
+var int   pendShortBar  = na
 
 // NOTE: the drawing below is written inline rather than wrapped in a helper
 // function, and it has to stay that way. Pine functions cannot assign to
@@ -232,34 +282,38 @@ var float restRR  = na
 newTrade = false
 
 if longSignal
+    entryPx = retestMode ? pendLongZone : close
     st = nz(sweepLowPx, low) - stopBufferATR * atrVal
-    risk = close - st
-    reward = asiaHigh - close
+    risk = entryPx - st
+    reward = asiaHigh - entryPx
     if risk > 0 and reward > 0 and (minRR <= 0 or reward / risk >= minRR)
         restStop   := st
         restTarget := asiaHigh
-        restEntry  := close
+        restEntry  := entryPx
         restCSD    := refHigh
         restRR     := reward / risk
         restLong   := true
         tookLong   := true
         newTrade   := true
-        strategy.entry("Asia Long", strategy.long)
+        strategy.entry("Asia Long", strategy.long, limit=retestMode ? entryPx : na)
+        pendLongZone := na
         strategy.exit("Asia Long X", from_entry="Asia Long", stop=st, limit=asiaHigh)
 else if shortSignal
+    entryPx = retestMode ? pendShortZone : close
     st = nz(sweepHighPx, high) + stopBufferATR * atrVal
-    risk = st - close
-    reward = close - asiaLow
+    risk = st - entryPx
+    reward = entryPx - asiaLow
     if risk > 0 and reward > 0 and (minRR <= 0 or reward / risk >= minRR)
         restStop   := st
         restTarget := asiaLow
-        restEntry  := close
+        restEntry  := entryPx
         restCSD    := refLow
         restRR     := reward / risk
         restLong   := false
         tookShort  := true
         newTrade   := true
-        strategy.entry("Asia Short", strategy.short)
+        strategy.entry("Asia Short", strategy.short, limit=retestMode ? entryPx : na)
+        pendShortZone := na
         strategy.exit("Asia Short X", from_entry="Asia Short", stop=st, limit=asiaLow)
 
 // The full trade picture, drawn the way TradingView's own Long/Short Position
@@ -372,3 +426,10 @@ if close < open
     lastDownHigh := high
 else if close > open
     lastUpLow := low
+
+if gapDn > fvgMinSize
+    bearFvgLo := high
+    bearFvgHi := low[2]
+else if gapUp > fvgMinSize
+    bullFvgLo := high[2]
+    bullFvgHi := low

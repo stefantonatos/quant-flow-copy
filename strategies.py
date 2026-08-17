@@ -17,7 +17,7 @@ import math
 from engine import (
     Strategy, Bar, sma, ema, rsi, atr, bollinger, highest, lowest,
     macd, stochastic, vwap_rolling, supertrend, roc,
-    wavetrend, cci, adx, normalize01, pivots, confirmed_pivots,
+    wavetrend, cci, adx, normalize01, pivots, confirmed_pivots, fvgs,
 )
 from typing import List
 
@@ -1174,7 +1174,14 @@ class AsiaSweepCSD(Strategy):
       reading: the first bar closing back above the high of the most recent
       down-close bar (mirrored for shorts). `"swing"` is looser -- a close
       beyond the highest high of the last `swing_lookback` bars, i.e. a mini
-      break of structure.
+      break of structure. `"ifvg"` is the inverse-fair-value-gap reading:
+      a bearish gap that price closes back above has stopped being a
+      sell-side imbalance and started acting as support, which is the same
+      claim "change in state of delivery" makes -- an inversion IS a CSD, so
+      this is a third reading of one idea rather than a separate strategy.
+      `ifvg_entry` then chooses between entering on the inversion bar's
+      close (default) and waiting for price to retest the flipped zone;
+      those are materially different trades, so both are available.
     - `one_per_day` -- default True, first valid setup only.
     - Session hours -- default 00:00-09:00 UTC. CONFIRMED from a screenshot of
       Stefan's Leviathan Market Sessions panel: his Asia block is Tokyo,
@@ -1211,6 +1218,8 @@ class AsiaSweepCSD(Strategy):
         trade_end = p.get("trade_end_hour", 21)
         csd_mode = p.get("csd_mode", "candle")
         swing_lookback = p.get("swing_lookback", 5)
+        ifvg_entry = p.get("ifvg_entry", "close")
+        fvg_min_size = p.get("fvg_min_size", 0.0)
         stop_buffer_atr = p.get("stop_buffer_atr", 0.10)
         one_per_day = p.get("one_per_day", True)
         both_sides = p.get("both_sides", False)
@@ -1222,6 +1231,14 @@ class AsiaSweepCSD(Strategy):
         start_short = [False] * n
         stops: List[float] = [float("nan")] * n
         targets: List[float] = [float("nan")] * n
+        entries: List[float] = [float("nan")] * n
+
+        # Fair value gaps, keyed by the bar they become knowable on. All three
+        # bars of a gap are closed by then, so there is no confirmation lag to
+        # respect -- unlike pivots.
+        fvg_by_bar = {}
+        for g in fvgs(bars, fvg_min_size):
+            fvg_by_bar.setdefault(g["i"], []).append(g)
 
         hours = [datetime.datetime.utcfromtimestamp(b.t).hour for b in bars]
         days = [datetime.datetime.utcfromtimestamp(b.t).date() for b in bars]
@@ -1246,17 +1263,29 @@ class AsiaSweepCSD(Strategy):
             sweep_high_px = float("nan")
             last_down_high = float("nan")   # high of the most recent down-close bar
             last_up_low = float("nan")      # low of the most recent up-close bar
+            # iFVG state: the most recent gap of each polarity that has not yet
+            # been inverted, plus a pending retest zone once one has been.
+            last_bear_fvg = None
+            last_bull_fvg = None
+            pending_long_zone = None
+            pending_short_zone = None
             taken_long = taken_short = False
 
             for k in range(i, j):
                 b = bars[k]
                 if hours[k] < asia_end or hours[k] >= trade_end:
                     # Still inside Asia, or past the cutoff. Keep the CSD
-                    # trackers warm but do not trade.
+                    # trackers warm but do not trade -- a gap laid down during
+                    # accumulation is exactly the one distribution inverts.
                     if b.c < b.o:
                         last_down_high = b.h
                     elif b.c > b.o:
                         last_up_low = b.l
+                    for g in fvg_by_bar.get(k, ()):
+                        if g["dir"] == -1:
+                            last_bear_fvg = dict(g)
+                        else:
+                            last_bull_fvg = dict(g)
                     continue
 
                 # --- Step 2: the sweep ---------------------------------
@@ -1276,6 +1305,14 @@ class AsiaSweepCSD(Strategy):
                     lo_k = max(i, k - swing_lookback)
                     ref_high = max((bars[m].h for m in range(lo_k, k)), default=float("nan"))
                     ref_low = min((bars[m].l for m in range(lo_k, k)), default=float("nan"))
+                elif csd_mode == "ifvg":
+                    # An inversion IS a change in the state of delivery: a
+                    # bearish gap that price closes back above has stopped
+                    # being a sell-side imbalance and started acting as
+                    # support. Reference is the top of the most recent
+                    # un-inverted bearish gap (mirrored for shorts).
+                    ref_high = last_bear_fvg["hi"] if last_bear_fvg else float("nan")
+                    ref_low = last_bull_fvg["lo"] if last_bull_fvg else float("nan")
                 else:
                     ref_high = last_down_high
                     ref_low = last_up_low
@@ -1288,32 +1325,87 @@ class AsiaSweepCSD(Strategy):
                         can_long = can_long and not taken_short
                         can_short = can_short and not taken_long
 
-                if (can_long and av == av and av > 0
-                        and ref_high == ref_high and b.c > ref_high):
-                    entry = b.c
+                inverted_long = (ref_high == ref_high and b.c > ref_high)
+                inverted_short = (ref_low == ref_low and b.c < ref_low)
+
+                # In retest mode the inversion only ARMS the trade; the entry
+                # waits for price to come back to the flipped zone. Entering
+                # on the inversion bar's close and entering on the retest are
+                # materially different trades, which is why both exist.
+                if csd_mode == "ifvg" and ifvg_entry == "retest":
+                    if can_long and inverted_long and pending_long_zone is None:
+                        pending_long_zone = dict(last_bear_fvg)
+                        pending_long_zone["armed_at"] = k
+                        last_bear_fvg = None
+                        inverted_long = False
+                    elif can_short and inverted_short and pending_short_zone is None:
+                        pending_short_zone = dict(last_bull_fvg)
+                        pending_short_zone["armed_at"] = k
+                        last_bull_fvg = None
+                        inverted_short = False
+                    else:
+                        inverted_long = inverted_short = False
+
+                    # The retest may only fill on a bar AFTER the inversion.
+                    # The inverting bar necessarily traded through the zone on
+                    # its way to closing above it, so accepting a fill there
+                    # would book a price that happened BEFORE the close which
+                    # generated the signal -- textbook lookahead, and it
+                    # flatters R badly because it is always the best price of
+                    # the bar.
+                    if (pending_long_zone is not None
+                            and k > pending_long_zone["armed_at"]
+                            and b.l <= pending_long_zone["hi"]):
+                        inverted_long = True
+                    if (pending_short_zone is not None
+                            and k > pending_short_zone["armed_at"]
+                            and b.h >= pending_short_zone["lo"]):
+                        inverted_short = True
+
+                if can_long and av == av and av > 0 and inverted_long:
+                    if csd_mode == "ifvg" and ifvg_entry == "retest":
+                        entry = pending_long_zone["hi"]
+                    else:
+                        entry = b.c
                     stop = sweep_low_px - stop_buffer_atr * av
                     target = asia_high
                     risk, reward = entry - stop, target - entry
                     if risk > 0 and reward > 0 and (min_rr <= 0 or reward / risk >= min_rr):
                         start_long[k] = True
                         stops[k], targets[k] = stop, target
+                        entries[k] = entry
                         taken_long = True
-                elif (can_short and av == av and av > 0
-                        and ref_low == ref_low and b.c < ref_low):
-                    entry = b.c
+                        pending_long_zone = None
+                        if csd_mode == "ifvg":
+                            last_bear_fvg = None
+                elif can_short and av == av and av > 0 and inverted_short:
+                    if csd_mode == "ifvg" and ifvg_entry == "retest":
+                        entry = pending_short_zone["lo"]
+                    else:
+                        entry = b.c
                     stop = sweep_high_px + stop_buffer_atr * av
                     target = asia_low
                     risk, reward = stop - entry, entry - target
                     if risk > 0 and reward > 0 and (min_rr <= 0 or reward / risk >= min_rr):
                         start_short[k] = True
                         stops[k], targets[k] = stop, target
+                        entries[k] = entry
                         taken_short = True
+                        pending_short_zone = None
+                        if csd_mode == "ifvg":
+                            last_bull_fvg = None
 
-                # Update the trackers AFTER this bar has been judged.
+                # Update the trackers AFTER this bar has been judged, so a bar
+                # can never be both the reference and the trigger.
                 if b.c < b.o:
                     last_down_high = b.h
                 elif b.c > b.o:
                     last_up_low = b.l
+                for g in fvg_by_bar.get(k, ()):
+                    if g["dir"] == -1:
+                        last_bear_fvg = dict(g)
+                    else:
+                        last_bull_fvg = dict(g)
 
             i = j
 
@@ -1321,6 +1413,12 @@ class AsiaSweepCSD(Strategy):
         self.start_short = start_short
         self.stops = stops
         self.targets = targets
+        # Only the iFVG retest mode fills away from the signal bar's close;
+        # every other mode enters at the close, where `entries` must stay
+        # absent so brackets.py keeps its default (and lookahead-free) path.
+        if csd_mode == "ifvg" and ifvg_entry == "retest":
+            self.entries = entries
+            self.allow_entry_bar_fill = True
         # One fixed target, no scale-out: the transcript names a single
         # destination (the opposite Asia level), so inventing a partial exit
         # would change the payoff into something he never described.
