@@ -104,7 +104,10 @@ zoneMaxAge  = input.int(100, "Level Max Age (bars)", minval=1, group=grpTrade,
 
 showLevels = input.bool(true, "Show pending levels", group=grpDisp)
 showMarks  = input.bool(true, "Mark wickless candles", group=grpDisp)
-showBracket = input.bool(true, "Show stop/target on entry", group=grpDisp)
+showBracket = input.bool(true, "TP / SL boxes", group=grpDisp)
+boxTransp  = input.int(82, "TP/SL box transparency", minval=0, maxval=100, group=grpDisp)
+tpColor    = input.color(#089981, "Take Profit", group=grpDisp)
+slColor    = input.color(#F23645, "Stop Loss", group=grpDisp)
 bullColor  = input.color(#089981, "Bullish", group=grpDisp)
 bearColor  = input.color(#F23645, "Bearish", group=grpDisp)
 
@@ -319,11 +322,43 @@ if strategy.position_size < 0
 
 justOpened = strategy.position_size != 0 and strategy.position_size[1] == 0
 
+// Drawn inline, not in a helper: Pine functions cannot assign to global
+// variables, so a helper setting tpBox/slBox would not compile.
+var box   tpBox   = na
+var box   slBox   = na
+var line  entryLn = na
+var label tpLbl   = na
+var label slLbl   = na
+
 if justOpened and showBracket
-    lineColor = restIsLong ? bullColor : bearColor
-    line.new(bar_index, strategy.position_avg_price, bar_index + 12, strategy.position_avg_price, color=lineColor, width=2)
-    line.new(bar_index, restStop, bar_index + 12, restStop, color=color.new(color.red, 30), style=line.style_dashed)
-    line.new(bar_index, restTarget, bar_index + 12, restTarget, color=color.new(color.green, 30), style=line.style_dashed)
+    ep = strategy.position_avg_price
+    tpBox := box.new(bar_index, restTarget, bar_index + 1, ep,
+         bgcolor=color.new(tpColor, boxTransp), border_color=color.new(tpColor, 45),
+         border_width=1)
+    slBox := box.new(bar_index, ep, bar_index + 1, restStop,
+         bgcolor=color.new(slColor, boxTransp), border_color=color.new(slColor, 45),
+         border_width=1)
+    entryLn := line.new(bar_index, ep, bar_index + 1, ep,
+         color=color.new(color.white, 20), width=2)
+    rrShown = math.abs(restTarget - ep) / math.abs(ep - restStop)
+    tpLbl := label.new(bar_index + 1, restTarget,
+         "TP " + str.tostring(restTarget, format.mintick) + "   " +
+         str.tostring(rrShown, "#.##") + "R",
+         style=label.style_label_left, textcolor=tpColor,
+         color=color.rgb(0, 0, 0, 100), size=size.small)
+    slLbl := label.new(bar_index + 1, restStop,
+         "SL " + str.tostring(restStop, format.mintick),
+         style=label.style_label_left, textcolor=slColor,
+         color=color.rgb(0, 0, 0, 100), size=size.small)
+
+// Grow the boxes while the position is live, then stop -- a box that keeps
+// extending after the exit misrepresents how long the trade was actually held.
+if strategy.position_size != 0 and not na(tpBox)
+    box.set_right(tpBox, bar_index + 1)
+    box.set_right(slBox, bar_index + 1)
+    line.set_x2(entryLn, bar_index + 1)
+    label.set_x(tpLbl, bar_index + 1)
+    label.set_x(slLbl, bar_index + 1)
 
 plot(trendMode == "ema" ? emaVal : na, title="EMA", color=color.new(color.orange, 40))
 

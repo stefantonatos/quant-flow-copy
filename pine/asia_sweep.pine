@@ -63,7 +63,12 @@ strategy("Asia Sweep CSD", shorttitle="AsiaCSD", overlay=true,
          default_qty_type=strategy.percent_of_equity, default_qty_value=100,
          commission_type=strategy.commission.percent, commission_value=0.0,
          slippage=1, initial_capital=10000, pyramiding=0,
-         calc_on_every_tick=false, process_orders_on_close=false)
+         calc_on_every_tick=false, process_orders_on_close=true)
+// process_orders_on_close=true is deliberate. The rule is "enter on the CLOSE
+// of the CSD candle". Left false, a market order submitted as that bar closes
+// fills at the NEXT bar's open instead -- a whole bar late, on a setup whose
+// entire premise is momentum shifting at that exact candle. It also keeps this
+// aligned with the Python twin, which enters at bars[i].c.
 
 // ==================
 // ==== Inputs ======
@@ -92,10 +97,18 @@ minRR  = input.float(0.0, "Minimum Reward:Risk (0 = take everything)", minval=0,
      tooltip="The target is a fixed level, so R:R varies by setup. 0 takes every valid setup, which is what the transcript actually describes.")
 atrLen = input.int(14, "ATR Length", minval=1, group=grpTrade)
 
-showRange = input.bool(true, "Show Asia range", group=grpDisp)
-showBracket = input.bool(true, "Show stop/target on entry", group=grpDisp)
-bullColor = input.color(#089981, "Bullish", group=grpDisp)
-bearColor = input.color(#F23645, "Bearish", group=grpDisp)
+showRange   = input.bool(true, "Asia session box + levels", group=grpDisp)
+showBracket = input.bool(true, "TP / SL boxes", group=grpDisp)
+showCSD     = input.bool(true, "CSD line", group=grpDisp)
+csdExtendBack = input.int(6, "CSD line: bars drawn back", minval=0, maxval=60, group=grpDisp,
+     tooltip="How far left of the entry to draw the CSD level, so you can see the candle it came from.")
+boxTransp   = input.int(82, "TP/SL box transparency", minval=0, maxval=100, group=grpDisp)
+tpColor     = input.color(#089981, "Take Profit", group=grpDisp)
+slColor     = input.color(#F23645, "Stop Loss", group=grpDisp)
+csdColor    = input.color(#FF9800, "CSD line", group=grpDisp)
+asiaColor   = input.color(#2962FF, "Asia session", group=grpDisp)
+bullColor   = input.color(#089981, "Bullish marker", group=grpDisp)
+bearColor   = input.color(#F23645, "Bearish marker", group=grpDisp)
 
 // ==========================================
 // ==== Indicators -- global scope only =====
@@ -185,6 +198,9 @@ refLow  = csdMode == "swing" ? swingLo[1] : lastUpLow
 
 var float restStop   = na
 var float restTarget = na
+var float restEntry  = na
+var float restCSD    = na
+var bool  restLong   = false
 
 blocked = onePerDay and (tookLong or tookShort)
 
@@ -193,6 +209,28 @@ longSignal = (canTrade and sweptLow and not blocked and not na(refHigh) and
 shortSignal = (canTrade and sweptHigh and not blocked and not na(refLow) and
      close < refLow)
 
+// ==========================================
+// ==== Trade drawings ======================
+// ==========================================
+// Declared up here because Pine requires `var` at global scope, but they are
+// populated inside the signal branches below.
+
+var box   tpBox   = na
+var box   slBox   = na
+var line  entryLn = na
+var line  csdLn   = na
+var label tpLbl   = na
+var label slLbl   = na
+var label csdLbl  = na
+var float restRR  = na
+
+// NOTE: the drawing below is written inline rather than wrapped in a helper
+// function, and it has to stay that way. Pine functions cannot assign to
+// global variables, so a drawTrade() helper that sets tpBox/slBox/... simply
+// will not compile. Do not "tidy" this into a function.
+
+newTrade = false
+
 if longSignal
     st = nz(sweepLowPx, low) - stopBufferATR * atrVal
     risk = close - st
@@ -200,7 +238,12 @@ if longSignal
     if risk > 0 and reward > 0 and (minRR <= 0 or reward / risk >= minRR)
         restStop   := st
         restTarget := asiaHigh
+        restEntry  := close
+        restCSD    := refHigh
+        restRR     := reward / risk
+        restLong   := true
         tookLong   := true
+        newTrade   := true
         strategy.entry("Asia Long", strategy.long)
         strategy.exit("Asia Long X", from_entry="Asia Long", stop=st, limit=asiaHigh)
 else if shortSignal
@@ -210,27 +253,95 @@ else if shortSignal
     if risk > 0 and reward > 0 and (minRR <= 0 or reward / risk >= minRR)
         restStop   := st
         restTarget := asiaLow
+        restEntry  := close
+        restCSD    := refLow
+        restRR     := reward / risk
+        restLong   := false
         tookShort  := true
+        newTrade   := true
         strategy.entry("Asia Short", strategy.short)
         strategy.exit("Asia Short X", from_entry="Asia Short", stop=st, limit=asiaLow)
 
-// ==================
-// ==== Drawing =====
-// ==================
+// The full trade picture, drawn the way TradingView's own Long/Short Position
+// tool looks: a green box from entry up to target, a red box from entry down
+// to stop, the entry itself as a solid line, and the CSD level it triggered
+// off. Every historical trade keeps its own set.
+if newTrade and showBracket
+    tpBox := box.new(bar_index, restTarget, bar_index + 1, restEntry,
+         bgcolor=color.new(tpColor, boxTransp), border_color=color.new(tpColor, 45),
+         border_width=1)
+    slBox := box.new(bar_index, restEntry, bar_index + 1, restStop,
+         bgcolor=color.new(slColor, boxTransp), border_color=color.new(slColor, 45),
+         border_width=1)
+    entryLn := line.new(bar_index, restEntry, bar_index + 1, restEntry,
+         color=color.new(color.white, 20), width=2)
+    tpLbl := label.new(bar_index + 1, restTarget,
+         "TP " + str.tostring(restTarget, format.mintick) + "   " +
+         str.tostring(restRR, "#.##") + "R",
+         style=label.style_label_left, textcolor=tpColor,
+         color=color.rgb(0, 0, 0, 100), size=size.small)
+    slLbl := label.new(bar_index + 1, restStop,
+         "SL " + str.tostring(restStop, format.mintick),
+         style=label.style_label_left, textcolor=slColor,
+         color=color.rgb(0, 0, 0, 100), size=size.small)
 
-plot(showRange and not na(asiaHigh) ? asiaHigh : na, title="Asia High",
-     color=color.new(bullColor, 20), style=plot.style_linebr, linewidth=1)
-plot(showRange and not na(asiaLow) ? asiaLow : na, title="Asia Low",
-     color=color.new(bearColor, 20), style=plot.style_linebr, linewidth=1)
+if newTrade and showCSD and not na(restCSD)
+    csdLn := line.new(bar_index - csdExtendBack, restCSD, bar_index + 1, restCSD,
+         color=csdColor, width=2)
+    csdLbl := label.new(bar_index, restCSD, "CSD",
+         style=restLong ? label.style_label_down : label.style_label_up,
+         textcolor=csdColor, color=color.rgb(0, 0, 0, 100), size=size.tiny)
 
-bgcolor(inAsia and showRange ? color.new(color.blue, 92) : na, title="Asia session")
+// Stretch the trade drawings rightward while the position is live, then stop.
+// A box that keeps growing after the trade closed misrepresents how long the
+// position was actually held.
+inTrade2 = strategy.position_size != 0
+if inTrade2 and not na(tpBox)
+    box.set_right(tpBox, bar_index + 1)
+    box.set_right(slBox, bar_index + 1)
+    line.set_x2(entryLn, bar_index + 1)
+    label.set_x(tpLbl, bar_index + 1)
+    label.set_x(slLbl, bar_index + 1)
+    if not na(csdLn)
+        line.set_x2(csdLn, bar_index + 1)
 
-justOpened = strategy.position_size != 0 and strategy.position_size[1] == 0
-if justOpened and showBracket
-    lc = strategy.position_size > 0 ? bullColor : bearColor
-    line.new(bar_index, strategy.position_avg_price, bar_index + 24, strategy.position_avg_price, color=lc, width=2)
-    line.new(bar_index, restStop, bar_index + 24, restStop, color=color.new(color.red, 30), style=line.style_dashed)
-    line.new(bar_index, restTarget, bar_index + 24, restTarget, color=color.new(color.green, 30), style=line.style_dashed)
+// ==========================================
+// ==== Asia session box (Leviathan style) ==
+// ==========================================
+// Same construction the Market Sessions indicator uses: open a box when the
+// session starts, then push its top/bottom/right out on every bar inside it.
+
+var box   asiaBox  = na
+var line  asiaHiLn = na
+var line  asiaLoLn = na
+var label asiaLbl  = na
+
+if asiaStarted and showRange
+    asiaBox := box.new(bar_index, high, bar_index + 1, low,
+         bgcolor=color.new(asiaColor, 92), border_color=color.new(asiaColor, 40),
+         border_width=1, border_style=line.style_dashed)
+    asiaLbl := label.new(bar_index, high, "ASIA", style=label.style_label_down,
+         textcolor=color.new(asiaColor, 25), color=color.rgb(0, 0, 0, 100),
+         size=size.tiny)
+
+if inAsia and showRange and not na(asiaBox)
+    box.set_top(asiaBox, liveHigh)
+    box.set_bottom(asiaBox, liveLow)
+    box.set_right(asiaBox, bar_index + 1)
+    label.set_y(asiaLbl, liveHigh)
+
+// Once Asia closes, run its high and low forward as dashed rails. These are
+// the levels the strategy is actually trading against -- one is the liquidity
+// that gets swept, the other is the target -- so they need to stay visible.
+if not inAsia and inAsia[1] and showRange
+    asiaHiLn := line.new(bar_index, asiaHigh, bar_index + 1, asiaHigh,
+         color=color.new(bullColor, 25), width=1, style=line.style_dashed)
+    asiaLoLn := line.new(bar_index, asiaLow, bar_index + 1, asiaLow,
+         color=color.new(bearColor, 25), width=1, style=line.style_dashed)
+
+if not inAsia and showRange and not na(asiaHiLn)
+    line.set_x2(asiaHiLn, bar_index + 1)
+    line.set_x2(asiaLoLn, bar_index + 1)
 
 plotshape(longSignal, title="CSD long", style=shape.triangleup,
           location=location.belowbar, color=bullColor, size=size.tiny)
