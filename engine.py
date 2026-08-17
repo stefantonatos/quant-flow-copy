@@ -360,6 +360,52 @@ def confirmed_pivots(bars: List[Bar], left: int = 5, right: int = 5):
     return highs, lows
 
 
+def smt_divergence(bars: List[Bar], ref_bars: List[Bar], lookback: int = 20):
+    """SMT divergence: two correlated instruments disagreeing at an extreme.
+
+    A bearish SMT at bar `i` means THIS series made a new high over the
+    lookback window while the reference series did NOT. NQ sweeps its
+    all-time high, ES does not follow -- so the "breakout" was one index
+    reaching for liquidity rather than both markets actually going up.
+    Bullish SMT is the mirror: this series makes a new low, the reference
+    holds.
+
+    Returns two boolean lists (bearish, bullish), parallel to `bars`.
+
+    ALIGNMENT IS BY TIMESTAMP, NOT BY INDEX. Two real feeds will not have
+    identical bar counts -- different session breaks, holidays and gaps see
+    to that -- so lining them up positionally silently compares different
+    moments in time and invents divergences that never happened. Bars with
+    no exact timestamp match in the reference produce no signal at all,
+    which is the honest answer rather than a guessed one.
+
+    CAUSALITY: both windows end at `i - 1` and the test uses bar `i`'s own
+    high/low, so every input is closed by the time the signal appears.
+    """
+    n = len(bars)
+    bearish = [False] * n
+    bullish = [False] * n
+    if lookback < 1 or n == 0 or not ref_bars:
+        return bearish, bullish
+
+    ref_at = {b.t: k for k, b in enumerate(ref_bars)}
+
+    for i in range(lookback, n):
+        k = ref_at.get(bars[i].t)
+        if k is None or k < lookback:
+            continue
+        prior_high = max(b.h for b in bars[i - lookback:i])
+        prior_low = min(b.l for b in bars[i - lookback:i])
+        ref_prior_high = max(b.h for b in ref_bars[k - lookback:k])
+        ref_prior_low = min(b.l for b in ref_bars[k - lookback:k])
+
+        if bars[i].h > prior_high and ref_bars[k].h <= ref_prior_high:
+            bearish[i] = True
+        if bars[i].l < prior_low and ref_bars[k].l >= ref_prior_low:
+            bullish[i] = True
+    return bearish, bullish
+
+
 def fvgs(bars: List[Bar], min_size: float = 0.0):
     """Three-bar fair value gaps (imbalances).
 

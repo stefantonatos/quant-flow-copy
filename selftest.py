@@ -1293,6 +1293,74 @@ class TestFVG(unittest.TestCase):
         self.assertEqual(len(fvgs(bars, min_size=1.0)), 0)
 
 
+class TestSMTDivergence(unittest.TestCase):
+    """Two correlated instruments disagreeing at an extreme -- NQ sweeps its
+    high, ES does not follow."""
+
+    @staticmethod
+    def _series(highs, lows=None, t0=0, dt=60):
+        lows = lows or [h - 1 for h in highs]
+        return [Bar(t=t0 + i * dt, o=h - 0.5, h=h, l=l, c=h - 0.5, v=1.0)
+                for i, (h, l) in enumerate(zip(highs, lows))]
+
+    def test_bearish_smt_when_only_one_makes_a_new_high(self):
+        from engine import smt_divergence
+        base = [100] * 10
+        a = self._series(base + [105])   # this one breaks out
+        b = self._series(base + [99])    # the reference does not
+        bear, bull = smt_divergence(a, b, lookback=5)
+        self.assertTrue(bear[10])
+        self.assertFalse(bull[10])
+
+    def test_no_smt_when_both_make_a_new_high(self):
+        """Both indices going up together is just a rally. Flagging that as
+        divergence would fire on every trend and mean nothing."""
+        from engine import smt_divergence
+        base = [100] * 10
+        a = self._series(base + [105])
+        b = self._series(base + [106])
+        bear, _ = smt_divergence(a, b, lookback=5)
+        self.assertFalse(bear[10])
+
+    def test_bullish_smt_when_only_one_makes_a_new_low(self):
+        from engine import smt_divergence
+        base_h = [100] * 10
+        a = self._series(base_h + [100], lows=[99] * 10 + [94])
+        b = self._series(base_h + [100], lows=[99] * 10 + [99.5])
+        bear, bull = smt_divergence(a, b, lookback=5)
+        self.assertTrue(bull[10])
+        self.assertFalse(bear[10])
+
+    def test_alignment_is_by_timestamp_not_index(self):
+        """THE correctness property. Two real feeds differ in bar count --
+        session breaks, holidays, gaps. Lining them up positionally compares
+        different moments and manufactures divergences that never happened.
+        Here the reference is shifted an hour; nothing may match."""
+        from engine import smt_divergence
+        base = [100] * 10
+        a = self._series(base + [105], t0=0, dt=60)
+        b = self._series(base + [99], t0=3600, dt=60)
+        bear, bull = smt_divergence(a, b, lookback=5)
+        self.assertEqual(sum(bear), 0)
+        self.assertEqual(sum(bull), 0)
+
+    def test_missing_reference_bars_produce_no_signal(self):
+        """A gap in the reference feed must yield silence, not a guess."""
+        from engine import smt_divergence
+        base = [100] * 10
+        a = self._series(base + [105])
+        b = self._series(base + [99])
+        del b[10]                        # the bar that would have diverged
+        bear, _ = smt_divergence(a, b, lookback=5)
+        self.assertFalse(bear[10])
+
+    def test_empty_reference_is_handled(self):
+        from engine import smt_divergence
+        a = self._series([100] * 12)
+        bear, bull = smt_divergence(a, [], lookback=5)
+        self.assertEqual(sum(bear) + sum(bull), 0)
+
+
 class TestAsiaSweepIFVG(unittest.TestCase):
     """csd_mode="ifvg" -- an inversion IS a change in state of delivery, so
     this is a third reading of the same idea rather than a new strategy."""

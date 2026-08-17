@@ -237,7 +237,45 @@ not a free upgrade.
 `test_amd_with_ifvg_routes_here_and_selects_ifvg_mode` and
 `test_power_of_three_still_routes` guard both directions.
 
-Test counts now **`selftest.py` 94, `test_engine.py` 13.**
+Test counts now **`selftest.py` 99, `test_engine.py` 13.**
+
+## Update (2026-08-16, last): SMT divergence — `engine.smt_divergence()` + `pine/smt_sweep.pine`
+
+Stefan sent a prop-trader's daily recap (NQ 1-min / 30-sec) and asked for it. Decomposed,
+**four of its six confluences were already in the repo** — HTF fair value gap, liquidity
+sweep, iFVG, change in state of delivery. Say this to him rather than building a fifth
+overlapping script: these video strategies keep resolving to the same handful of
+primitives in different arrangements.
+
+**The one genuinely new mechanism is SMT divergence**, now `engine.smt_divergence(bars,
+ref_bars, lookback)`: this instrument makes a new high while a correlated one does not, so
+the "breakout" was one index reaching for liquidity rather than both markets going up.
+
+**Two correctness properties, both test-locked, both easy to get wrong:**
+- **Alignment is by TIMESTAMP, never by index.** Two real feeds differ in bar count
+  (session breaks, holidays, gaps); lining them up positionally compares different moments
+  and manufactures divergences that never happened. Unmatched bars produce no signal.
+- **`request.security(..., lookahead=barmerge.lookahead_off)` is mandatory** in the Pine
+  file. The default hands back future data on historical bars, which would make any SMT
+  backtest look extraordinary and mean nothing.
+
+**What could NOT be mechanized, and it is the important part.** He picks targets by eye —
+some lows are "low resistance", others "high resistance ... protected by this gap". No rule
+in the video reproduces that, so `targetMode` substitutes the last confirmed swing low or a
+fixed R multiple. Target selection largely determines the R on every trade, so this script
+measures *an interpretation*, not his trading. He also cut the example trade early ("around
+20 points to secure the day") because he trades to a prop payout rule — so even the winning
+example is not the strategy.
+
+**On the source: the back half of that transcript is an affiliate funnel** — a discount code
+for funded-account firms, weekly giveaways for people who use it, a Discord. He is paid per
+account bought through the code, so the payout screenshots are marketing for the referral
+business, not an audited record. That does not make SMT wrong (it is a real, testable idea,
+which is why it got built) but attach zero evidential weight to the numbers.
+
+`requireSMT` defaults true but can be switched off, which is the cheap experiment worth
+running first: if SMT contributes nothing, trade count barely moves and expectancy does not
+improve.
 
 **Still nothing validated.** Every number above is synthetic random-walk sample data
 (`data.py`), which has no market structure — smoke tests that the pipeline runs, not
