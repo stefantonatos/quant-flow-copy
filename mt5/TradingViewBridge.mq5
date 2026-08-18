@@ -1,0 +1,256 @@
+//+------------------------------------------------------------------+
+//|  TradingViewBridge.mq5                                           |
+//|                                                                  |
+//|  The execution half of the TradingView -> MT5 bridge. Watches a  |
+//|  plain text queue file written by bridge/webhook_server.py and    |
+//|  places the orders it finds there.                                |
+//|                                                                  |
+//|  WHY A TEXT FILE                                                  |
+//|  A file is a boring interface, and boring is what you want        |
+//|  between the internet and your account. You can open it in        |
+//|  Notepad while it runs, see exactly what was asked for, and       |
+//|  delete a line to cancel it. Sockets and DLL imports offer no     |
+//|  advantage here and cost you that.                                |
+//|                                                                  |
+//|  INSTALL                                                          |
+//|  1. MetaEditor -> open this file -> Compile (F7).                 |
+//|  2. Point the webhook server's --queue at the SAME path as        |
+//|     QueueFile below. MT5 sandboxes file access to                 |
+//|     <terminal data folder>/MQL5/Files, so the server must write   |
+//|     there. Find it via File -> Open Data Folder in MT5.           |
+//|  3. Drag the EA onto any chart. The chart's symbol does not       |
+//|     matter -- each command names its own symbol.                  |
+//|  4. Enable AutoTrading (the button in the toolbar).               |
+//|                                                                  |
+//|  SAFETY                                                           |
+//|  DryRun defaults TRUE: commands are read and printed to the       |
+//|  Experts log, and nothing is sent to the broker. Leave it that    |
+//|  way until the log shows exactly the trades you expected for      |
+//|  several days. MaxLots is enforced here as well as on the         |
+//|  server, on purpose -- two independent caps, because this is the  |
+//|  half that spends money and it should not trust its input.        |
+//+------------------------------------------------------------------+
+#property copyright "quant-flow-copy"
+#property version   "1.00"
+#property strict
+
+#include <Trade\Trade.mqh>
+
+input string QueueFile      = "queue.txt";   // in MQL5/Files
+input string ProcessedFile  = "queue_done.txt";
+input bool   DryRun         = true;          // MUST be off for live orders
+input double MaxLots        = 0.10;          // hard cap, independent of the server's
+input int    MaxSlippage    = 20;            // points
+input int    PollSeconds    = 2;
+input long   MagicNumber    = 20260817;
+input bool   AllowClose     = true;
+
+CTrade  trade;
+int     g_processed = 0;   // how many lines of the queue we have consumed
+
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   trade.SetExpertMagicNumber(MagicNumber);
+   trade.SetDeviationInPoints(MaxSlippage);
+   trade.SetTypeFillingBySymbol(_Symbol);
+
+   g_processed = CountLines(ProcessedFile);
+   PrintFormat("TradingViewBridge: %s. queue=%s already-processed=%d maxLots=%.2f",
+               DryRun ? "DRY RUN (no orders will be sent)" : "LIVE",
+               QueueFile, g_processed, MaxLots);
+   if(!DryRun && !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+      Print("WARNING: AutoTrading is disabled in the terminal. Nothing will execute.");
+
+   EventSetTimer(PollSeconds < 1 ? 1 : PollSeconds);
+   return(INIT_SUCCEEDED);
+  }
+
+void OnDeinit(const int reason) { EventKillTimer(); }
+
+//+------------------------------------------------------------------+
+//| Count lines in a file (0 if it does not exist).                   |
+//+------------------------------------------------------------------+
+int CountLines(string name)
+  {
+   int h = FileOpen(name, FILE_READ|FILE_TXT|FILE_ANSI|FILE_SHARE_READ|FILE_SHARE_WRITE);
+   if(h == INVALID_HANDLE)
+      return 0;
+   int n = 0;
+   while(!FileIsEnding(h))
+     {
+      FileReadString(h);
+      n++;
+     }
+   FileClose(h);
+   return n;
+  }
+
+//+------------------------------------------------------------------+
+//| Record that a command was handled, so a restart does not replay   |
+//| the whole queue and re-open every position in it.                 |
+//+------------------------------------------------------------------+
+void MarkProcessed(string id, string verdict)
+  {
+   int h = FileOpen(ProcessedFile, FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+   if(h == INVALID_HANDLE)
+     {
+      PrintFormat("Could not open %s to record progress", ProcessedFile);
+      return;
+     }
+   FileSeek(h, 0, SEEK_END);
+   FileWrite(h, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + " " + id + " " + verdict);
+   FileClose(h);
+   g_processed++;
+  }
+
+//+------------------------------------------------------------------+
+string GetField(string line, string key)
+  {
+   string parts[];
+   int n = StringSplit(line, '|', parts);
+   for(int i = 0; i < n; i++)
+     {
+      string kv[];
+      if(StringSplit(parts[i], '=', kv) == 2 && kv[0] == key)
+         return kv[1];
+     }
+   return "";
+  }
+
+//+------------------------------------------------------------------+
+void OnTimer()
+  {
+   int h = FileOpen(QueueFile, FILE_READ|FILE_TXT|FILE_ANSI|FILE_SHARE_READ|FILE_SHARE_WRITE);
+   if(h == INVALID_HANDLE)
+      return;                       // no queue yet; the server has not written one
+
+   int index = 0;
+   while(!FileIsEnding(h))
+     {
+      string line = FileReadString(h);
+      index++;
+      if(index <= g_processed)      // already handled on a previous poll
+         continue;
+      if(StringLen(line) < 5)
+        {
+         g_processed++;
+         continue;
+        }
+      Execute(line);
+     }
+   FileClose(h);
+  }
+
+//+------------------------------------------------------------------+
+void Execute(string line)
+  {
+   string id     = GetField(line, "id");
+   string action = GetField(line, "action");
+   string symbol = GetField(line, "symbol");
+   string side   = GetField(line, "side");
+   string otype  = GetField(line, "type");
+   double price  = StringToDouble(GetField(line, "price"));
+   double sl     = StringToDouble(GetField(line, "sl"));
+   double tp     = StringToDouble(GetField(line, "tp"));
+   double lots   = StringToDouble(GetField(line, "lots"));
+   string cmt    = GetField(line, "comment");
+
+   PrintFormat("CMD %s: %s %s %s %s lots=%.2f price=%s sl=%s tp=%s",
+               id, action, side, otype, symbol, lots,
+               DoubleToString(price, _Digits), DoubleToString(sl, _Digits),
+               DoubleToString(tp, _Digits));
+
+   if(!SymbolSelect(symbol, true))
+     {
+      PrintFormat("REJECT %s: symbol %s is not available in this terminal", id, symbol);
+      MarkProcessed(id, "reject:unknown-symbol");
+      return;
+     }
+
+   // Second, independent lot cap. The server has one too. This half of the
+   // system spends money, so it does not trust its input.
+   if(lots > MaxLots)
+     {
+      PrintFormat("REJECT %s: lots %.2f exceeds EA cap %.2f", id, lots, MaxLots);
+      MarkProcessed(id, "reject:lots-cap");
+      return;
+     }
+
+   double minLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double lotStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   if(lotStep > 0)
+      lots = MathFloor(lots / lotStep) * lotStep;
+   if(lots < minLot)
+     {
+      PrintFormat("REJECT %s: lots %.4f below symbol minimum %.4f", id, lots, minLot);
+      MarkProcessed(id, "reject:below-min-lot");
+      return;
+     }
+
+   if(DryRun)
+     {
+      PrintFormat("DRY RUN %s: would have executed the above. Nothing sent.", id);
+      MarkProcessed(id, "dryrun");
+      return;
+     }
+
+   if(action == "close" || action == "close_all")
+     {
+      if(!AllowClose)
+        {
+         MarkProcessed(id, "reject:close-disabled");
+         return;
+        }
+      bool ok = ClosePositions(symbol);
+      MarkProcessed(id, ok ? "closed" : "close-failed");
+      return;
+     }
+
+   bool isBuy = (side == "buy");
+   bool ok = false;
+
+   if(otype == "limit")
+     {
+      ok = isBuy ? trade.BuyLimit(lots, price, symbol, sl, tp, ORDER_TIME_GTC, 0, cmt)
+                 : trade.SellLimit(lots, price, symbol, sl, tp, ORDER_TIME_GTC, 0, cmt);
+     }
+   else
+     {
+      ok = isBuy ? trade.Buy(lots, symbol, 0.0, sl, tp, cmt)
+                 : trade.Sell(lots, symbol, 0.0, sl, tp, cmt);
+     }
+
+   if(ok)
+      PrintFormat("OK %s: retcode=%d deal=%I64u", id, trade.ResultRetcode(), trade.ResultDeal());
+   else
+      PrintFormat("FAIL %s: retcode=%d (%s)", id, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+
+   MarkProcessed(id, ok ? "executed" : "failed");
+  }
+
+//+------------------------------------------------------------------+
+//| Close only positions this EA opened -- never touch a position a   |
+//| human placed by hand.                                             |
+//+------------------------------------------------------------------+
+bool ClosePositions(string symbol)
+  {
+   bool all = true;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;                       // not ours; leave it alone
+      if(!trade.PositionClose(ticket))
+        {
+         PrintFormat("close failed for ticket %I64u: %d", ticket, trade.ResultRetcode());
+         all = false;
+        }
+     }
+   return all;
+  }
+//+------------------------------------------------------------------+

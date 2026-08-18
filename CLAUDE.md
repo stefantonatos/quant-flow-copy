@@ -277,6 +277,40 @@ which is why it got built) but attach zero evidential weight to the numbers.
 running first: if SMT contributes nothing, trade count barely moves and expectancy does not
 improve.
 
+## Update (2026-08-18): `bridge/` — self-hosted TradingView -> MT5 execution
+
+Stefan asked whether we could copy **viewlink.dev** ("execute your TradingView analysis on
+MT5"). Yes, and the finding is the same one this whole project started with: **the product
+is hosting, not algorithm.** A bridge is a webhook receiver plus an order placer. What the
+paid services actually sell is a URL that stays up when your PC does not — a real service,
+just not a secret one. Say that plainly rather than implying they are ripping anyone off.
+
+Two halves, talking through a **plain text file** (deliberate: readable in Notepad
+mid-run, cancel a command by deleting its line; a socket would buy nothing here):
+- `bridge/webhook_server.py` — stdlib-only HTTP receiver, validates and appends commands.
+- `mt5/TradingViewBridge.mq5` — polls the queue, places orders via `CTrade`.
+
+**Both halves refuse independently, on purpose — the EA does not trust the server, because
+the EA is the half that spends money.** Rails, all defaulting to safe:
+- **Dry run is the default in BOTH** (`--live` flag / `DryRun=true` input).
+- Shared secret, **minimum 12 chars, enforced at startup**. The webhook URL is effectively
+  public.
+- Symbol allowlist; two independent lot caps.
+- **Stop-direction validation** — a buy with its stop above entry is refused. That one typo
+  turns a bracket into an instant loss or an unprotected position.
+- **Duplicate suppression by command id** — TradingView re-fires alerts, and without this a
+  retry silently doubles the position.
+- The EA closes **only positions carrying its own magic number**, never a hand-placed trade.
+
+`bridge/test_bridge.py` — **21 tests, all about what the validator must REFUSE.** That is
+the right shape for this component: it sits between a public URL and a brokerage account.
+Verified end to end over real HTTP (one valid order queued, four bad ones rejected with
+reasons).
+
+**Do not lose the warning in `bridge/README.md`:** a bridge does not create edge, it removes
+the delay between signal and position. Nothing here is validated yet, so switching this on
+makes an unmeasured strategy lose money faster and unsupervised. Measure first.
+
 **Still nothing validated.** Every number above is synthetic random-walk sample data
 (`data.py`), which has no market structure — smoke tests that the pipeline runs, not
 measurements of edge. Both new strategies fire only a handful of trades on it. The real
