@@ -302,6 +302,32 @@ the EA is the half that spends money.** Rails, all defaulting to safe:
   retry silently doubles the position.
 - The EA closes **only positions carrying its own magic number**, never a hand-placed trade.
 
+**⚠️ CORRECTION to the first version of this section: the webhook route is unusable for
+Stefan.** TradingView's free (Basic) plan gives **3 price alerts and ZERO technical
+alerts**, and anything driven by a Pine script — indicator, strategy, `alert()` — is a
+technical alert. So on his account **no script in this repo can fire an alert at all**, and
+both alert-based routes are dead. Webhooks are additionally paid-only. This was shipped
+before checking the plan tiers; check a platform's free-tier limits before building on top
+of them.
+
+**What actually works on free, and it is what viewlink.dev does:** an *indicator* publishes
+the levels and a *browser extension* reads them — no alerts anywhere. Stefan supplied this
+detail ("chrome extension + tradingview indicator, when price hits entry it executes on
+MetaTrader"), and it was the thing that unblocked the design.
+
+- `pine/bridge_levels.pine` — publishes entry/stop/target as **named plots**. TradingView
+  prints plot values in the status line, so the extension can read them off the page. **The
+  plot titles Entry/Stop/Target are an interface, not decoration** — renaming them breaks
+  the extension's read button.
+- `bridge/extension/popup.*` — reads those levels, shows the R:R, flags a wrong-side stop
+  before you send, and posts the trade.
+
+**Deliberate departure from what the paid services do, and worth defending if questioned:**
+they keep a browser tab watching price and fire a *market* order on touch. This sends a
+**pending limit order** instead, so the broker does the waiting — server-side, no browser,
+no extension needed at the moment it matters, no browser latency on the fill. Same outcome,
+far fewer things that can be off at the wrong time.
+
 `bridge/test_bridge.py` — **21 tests, all about what the validator must REFUSE.** That is
 the right shape for this component: it sits between a public URL and a brokerage account.
 Verified end to end over real HTTP (one valid order queued, four bad ones rejected with

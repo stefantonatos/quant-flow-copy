@@ -35,30 +35,39 @@ it. Nothing about a socket would be better here, and a lot would be worse.
 python bridge/webhook_server.py --secret PICK-SOMETHING-LONG --symbols EURNZD
 ```
 
-**2. Choose how alerts reach it.** Two routes, and which one you can use
-depends on your TradingView plan:
+**2. Choose how trades reach it.** Which route you can use depends on your
+TradingView plan, and the free plan is more restricted than it looks:
 
-| | Webhook | Chrome extension |
-|---|---|---|
-| TradingView plan | **Paid only** (free has no webhook box) | Any, including free |
-| Needs browser open | No | **Yes** — tab open, on the chart, awake |
-| Needs a public URL | Yes (free tunnel) | No |
-| Breaks when TradingView redesigns | No | **Yes**, and probably quietly |
+> **TradingView free (Basic) gives you 3 PRICE alerts and ZERO technical
+> alerts.** Anything driven by a Pine script — indicator, strategy, `alert()`
+> — is a technical alert. So on a free account **no script in this repo can
+> ever fire an alert**, and both alert-based routes are unavailable. This is
+> exactly why the commercial bridges ship an indicator plus a browser
+> extension instead of using alerts.
 
-**Webhook route (preferred if you have a paid plan).** Give the server a public
-URL: `cloudflared tunnel --url http://localhost:8787` or `ngrok http 8787`.
-Both print an `https://…` address; your webhook URL is that plus `/webhook`.
+| Route | Plan needed | How it triggers | Browser open? |
+|---|---|---|---|
+| **Indicator + popup** | **Any, incl. free** | broker fills a pending limit order | only to send it |
+| Extension watches alerts | Paid (technical alerts) | alert fires on the page | yes, always |
+| Webhook | Paid | TradingView posts server-side | no |
 
-**Extension route (works on the free plan).** Chrome → Extensions →
-Extension. Set the endpoint (`http://127.0.0.1:8787/webhook`) and the same
-secret, then press **Send test alert** — it should come back `200 queued`, and
-you should see the line appear in the queue file. The extension reads the alert
-text off the TradingView page and posts it locally, which is precisely why it
-needs no paid plan and no public URL.
+**Indicator + popup — the free-plan route, and the one to use.**
 
-This is the honest trade: the extension costs you nothing and works on any
-plan, but it only fires while the tab is open, and it depends on TradingView's
-HTML not changing. The webhook costs a subscription and has neither problem.
+1. Add `pine/bridge_levels.pine` to your chart.
+2. Set the entry, stop and target — type them in, or set *Levels from* to
+   `nowick` / `asia` and it fills them from that setup.
+3. Click the extension → **Read levels from chart** → check the numbers →
+   **Send to MT5**.
+
+That sends a **pending limit order**. Your broker holds it and fills it when
+price reaches your entry — on their servers, whether or not your browser is
+open, your PC is awake, or this extension is still running.
+
+This is deliberately not a copy of how the paid services do it. They keep a
+browser tab watching price and fire a market order on touch, which needs the
+tab alive at the exact moment it matters and adds browser latency to the fill.
+A resting limit order gets the same result with fewer things that can be
+switched off at the wrong moment — and it is what limit orders are for.
 
 **3. Install the EA.** MetaEditor → open `mt5/TradingViewBridge.mq5` → Compile
 (F7) → drag onto any chart → enable AutoTrading. Point the server's `--queue`

@@ -88,3 +88,75 @@ const observer = new MutationObserver((mutations) => {
 
 observer.observe(document.body, { childList: true, subtree: true });
 console.log('[QuantFlow Bridge] watching TradingView for alerts');
+
+
+/* ---------------------------------------------------------------------------
+ * READ_LEVELS - pull entry/sl/tp off the chart for the popup.
+ *
+ * TradingView prints an indicator's plot values in its status line, so a Pine
+ * script that plots values titled "Entry" / "Stop" / "Target" puts those
+ * numbers on the page as text. pine/bridge_levels.pine does exactly that.
+ *
+ * This is scraping. It will break when TradingView redesigns their UI, and it
+ * may return nothing on a layout it does not recognise. That is why the popup
+ * has manual fields and treats this as a convenience: getting a number wrong
+ * here costs real money, so whatever it reads is presented for you to CHECK,
+ * never sent automatically.
+ * ------------------------------------------------------------------------ */
+
+function parseNum(text) {
+  if (!text) return null;
+  const m = String(text).replace(/[\u2212\u2013]/g, '-').match(/-?\d+(?:[.,]\d+)?/);
+  if (!m) return null;
+  const v = parseFloat(m[0].replace(',', '.'));
+  return isFinite(v) ? v : null;
+}
+
+function readLevels() {
+  const out = { symbol: null, entry: null, sl: null, tp: null, side: null };
+
+  const symEl = document.querySelector('[class*="symbolNameText"], [data-name="legend-source-title"]');
+  if (symEl) out.symbol = symEl.textContent.trim().toUpperCase();
+  if (!out.symbol) {
+    const m = document.title.match(/^([A-Z0-9._!]+)/);
+    if (m) out.symbol = m[1];
+  }
+
+  /* Walk every legend/status-line row and match on the plot's TITLE. Matching
+   * by title rather than by position means an extra plot in the indicator
+   * cannot silently shift which number lands in which field. */
+  const rows = document.querySelectorAll(
+    '[class*="valuesWrapper"], [class*="valuesAdditionalWrapper"], [data-name="legend-source-item"]'
+  );
+  for (const row of rows) {
+    const text = row.textContent || '';
+    for (const [key, re] of [
+      ['entry', /entry/i],
+      ['sl', /\b(stop|sl)\b/i],
+      ['tp', /\b(target|tp|take\s*profit)\b/i]
+    ]) {
+      if (out[key] == null && re.test(text)) {
+        const after = text.split(re)[1] || text;
+        const v = parseNum(after);
+        if (v != null) out[key] = v;
+      }
+    }
+    if (out.side == null) {
+      if (/\blong\b/i.test(text)) out.side = 'buy';
+      else if (/\bshort\b/i.test(text)) out.side = 'sell';
+    }
+  }
+
+  if (out.side == null && out.entry != null && out.sl != null)
+    out.side = out.sl < out.entry ? 'buy' : 'sell';   // stop below entry = a long
+
+  return out;
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === 'READ_LEVELS') {
+    try { sendResponse(readLevels()); }
+    catch (e) { sendResponse(null); }
+  }
+  return true;
+});

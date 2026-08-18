@@ -1,0 +1,160 @@
+//@version=6
+// ============================================================================
+// ==== BRIDGE LEVELS =========================================================
+// ============================================================================
+//
+// The indicator half of the TradingView -> MT5 bridge, for accounts that
+// cannot use alerts.
+//
+// WHY THIS EXISTS
+// TradingView's free plan allows 3 PRICE alerts and ZERO technical alerts,
+// and anything driven by a Pine script counts as technical. So on a free
+// account no script here can ever fire an alert -- which is exactly why the
+// commercial bridges ship a browser extension and an indicator instead of
+// using alerts at all.
+//
+// This script's job is therefore not to signal. It is to PUBLISH three
+// numbers -- entry, stop, target -- as named plots, because TradingView
+// prints plot values in the chart's status line, where the extension can read
+// them. Hence the plot titles below being plain words: they are an interface,
+// not decoration. Renaming them breaks the extension's "Read levels from
+// chart" button.
+//
+// TWO WAYS TO USE IT
+//   Manual   -- type an entry, stop and target into the settings. The script
+//               draws the bracket and publishes the numbers. Good for a trade
+//               you have picked by eye.
+//   Strategy -- point it at one of the repo's setups and it fills the levels
+//               in for you when that setup appears.
+//
+// HOW THE TRADE ACTUALLY EXECUTES
+// The extension sends these levels to MT5 as a PENDING LIMIT ORDER. Your
+// broker then fills it when price arrives, on their servers, whether or not
+// your browser is open. The paid services instead keep a browser tab watching
+// price and fire a market order on touch; a resting limit does the same job
+// with fewer things that can be switched off at the wrong moment.
+// ============================================================================
+
+indicator("Bridge Levels", shorttitle="Bridge", overlay=true,
+          max_lines_count=100, max_labels_count=100, max_boxes_count=100)
+
+grpTrade = "Trade"
+grpDisp  = "Display"
+
+mode = input.string("manual", "Levels from", options=["manual", "nowick", "asia"],
+     group=grpTrade,
+     tooltip="manual = you type the numbers. nowick/asia = derived from that setup when it appears.")
+
+side      = input.string("long", "Direction", options=["long", "short"], group=grpTrade)
+manEntry  = input.price(0.0, "Entry",  group=grpTrade, confirm=true)
+manStop   = input.price(0.0, "Stop",   group=grpTrade, confirm=true)
+manTarget = input.price(0.0, "Target", group=grpTrade, confirm=true)
+
+atrLen        = input.int(14, "ATR Length", minval=1, group=grpTrade)
+stopBufferATR = input.float(0.50, "Stop buffer (x ATR, auto modes)", minval=0.01, step=0.05, group=grpTrade)
+rr            = input.float(1.0, "Target R multiple (auto modes)", minval=0.1, step=0.1, group=grpTrade)
+wickTolFrac   = input.float(0.0, "Wick tolerance (fraction of range)", minval=0, maxval=0.5, step=0.01, group=grpTrade)
+asiaSess      = input.session("0000-0900", "Asia session (asia mode)", group=grpTrade)
+sessTZ        = input.string("UTC", "Session timezone", group=grpTrade)
+
+showBox   = input.bool(true, "Draw the bracket", group=grpDisp)
+tpColor   = input.color(#089981, "Target", group=grpDisp)
+slColor   = input.color(#F23645, "Stop", group=grpDisp)
+boxTransp = input.int(82, "Box transparency", minval=0, maxval=100, group=grpDisp)
+
+// ---- indicators: global scope only ----------------------------------------
+atrVal = ta.atr(atrLen)
+inAsia = not na(time(timeframe.period, asiaSess, sessTZ))
+
+var float asiaHigh = na
+var float asiaLow  = na
+var float liveHigh = na
+var float liveLow  = na
+
+asiaStarted = inAsia and not inAsia[1]
+if asiaStarted
+    liveHigh := high
+    liveLow  := low
+else if inAsia
+    liveHigh := math.max(nz(liveHigh, high), high)
+    liveLow  := math.min(nz(liveLow, low), low)
+if not inAsia and inAsia[1]
+    asiaHigh := liveHigh
+    asiaLow  := liveLow
+
+// ---- nowick mode: the most recent with-trend wickless candle --------------
+tolLimit = wickTolFrac * (high - low)
+bullMark = close > open and (open - low) <= tolLimit
+bearMark = close < open and (high - open) <= tolLimit
+
+var float autoEntry = na
+var float autoStop  = na
+var float autoTgt   = na
+var bool  autoLong  = true
+
+if mode == "nowick" and not na(atrVal) and atrVal > 0
+    if bullMark
+        autoEntry := low
+        autoStop  := low - stopBufferATR * atrVal
+        autoTgt   := low + rr * (low - (low - stopBufferATR * atrVal))
+        autoLong  := true
+    else if bearMark
+        autoEntry := high
+        autoStop  := high + stopBufferATR * atrVal
+        autoTgt   := high - rr * ((high + stopBufferATR * atrVal) - high)
+        autoLong  := false
+
+if mode == "asia" and not na(asiaHigh) and not na(asiaLow) and not na(atrVal) and atrVal > 0
+    if not inAsia and low < asiaLow
+        autoEntry := close
+        autoStop  := low - stopBufferATR * atrVal
+        autoTgt   := asiaHigh
+        autoLong  := true
+    else if not inAsia and high > asiaHigh
+        autoEntry := close
+        autoStop  := high + stopBufferATR * atrVal
+        autoTgt   := asiaLow
+        autoLong  := false
+
+isLong = mode == "manual" ? side == "long" : autoLong
+entry  = mode == "manual" ? manEntry  : autoEntry
+stopPx = mode == "manual" ? manStop   : autoStop
+tgtPx  = mode == "manual" ? manTarget : autoTgt
+
+// ============================================================================
+// THE INTERFACE. These three plot titles are read by the browser extension's
+// "Read levels from chart" button, which matches on the words Entry / Stop /
+// Target in the status line. Rename them and that button stops working.
+// ============================================================================
+plot(entry  != 0 ? entry  : na, title="Entry",  color=color.new(color.white, 0),  linewidth=2, style=plot.style_linebr)
+plot(stopPx != 0 ? stopPx : na, title="Stop",   color=color.new(slColor, 0),      linewidth=1, style=plot.style_linebr)
+plot(tgtPx  != 0 ? tgtPx  : na, title="Target", color=color.new(tpColor, 0),      linewidth=1, style=plot.style_linebr)
+
+// Direction, so the extension can tell a long from a short without guessing
+// from the geometry. 1 = long, -1 = short.
+plot(entry != 0 ? (isLong ? 1 : -1) : na, title="Long", display=display.status_line)
+
+// ---- risk:reward readout ---------------------------------------------------
+riskAmt   = entry != 0 and stopPx != 0 ? math.abs(entry - stopPx) : na
+rewardAmt = entry != 0 and tgtPx  != 0 ? math.abs(tgtPx - entry)  : na
+rrValue   = not na(riskAmt) and riskAmt > 0 ? rewardAmt / riskAmt : na
+plot(rrValue, title="RR", display=display.status_line)
+
+// ---- drawing ---------------------------------------------------------------
+var box tpB = na
+var box slB = na
+
+if showBox and entry != 0 and stopPx != 0 and tgtPx != 0
+    if not na(tpB)
+        box.delete(tpB)
+        box.delete(slB)
+    tpB := box.new(bar_index - 30, tgtPx, bar_index + 10, entry,
+         bgcolor=color.new(tpColor, boxTransp), border_color=color.new(tpColor, 45))
+    slB := box.new(bar_index - 30, entry, bar_index + 10, stopPx,
+         bgcolor=color.new(slColor, boxTransp), border_color=color.new(slColor, 45))
+
+// A wrong-side stop is the most expensive typo available here, so it is shown
+// on the chart rather than left to be discovered in a rejection log.
+badStop = entry != 0 and stopPx != 0 and
+     ((isLong and stopPx >= entry) or (not isLong and stopPx <= entry))
+bgcolor(badStop ? color.new(color.red, 85) : na, title="Stop on the wrong side")
