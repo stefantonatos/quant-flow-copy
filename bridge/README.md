@@ -35,10 +35,30 @@ it. Nothing about a socket would be better here, and a lot would be worse.
 python bridge/webhook_server.py --secret PICK-SOMETHING-LONG --symbols EURNZD
 ```
 
-**2. Give it a public URL.** TradingView has to reach it from the internet.
-Free options: `cloudflared tunnel --url http://localhost:8787` or
-`ngrok http 8787`. Both print an `https://…` address. Your webhook URL is that
-address plus `/webhook`.
+**2. Choose how alerts reach it.** Two routes, and which one you can use
+depends on your TradingView plan:
+
+| | Webhook | Chrome extension |
+|---|---|---|
+| TradingView plan | **Paid only** (free has no webhook box) | Any, including free |
+| Needs browser open | No | **Yes** — tab open, on the chart, awake |
+| Needs a public URL | Yes (free tunnel) | No |
+| Breaks when TradingView redesigns | No | **Yes**, and probably quietly |
+
+**Webhook route (preferred if you have a paid plan).** Give the server a public
+URL: `cloudflared tunnel --url http://localhost:8787` or `ngrok http 8787`.
+Both print an `https://…` address; your webhook URL is that plus `/webhook`.
+
+**Extension route (works on the free plan).** Chrome → Extensions →
+Extension. Set the endpoint (`http://127.0.0.1:8787/webhook`) and the same
+secret, then press **Send test alert** — it should come back `200 queued`, and
+you should see the line appear in the queue file. The extension reads the alert
+text off the TradingView page and posts it locally, which is precisely why it
+needs no paid plan and no public URL.
+
+This is the honest trade: the extension costs you nothing and works on any
+plan, but it only fires while the tab is open, and it depends on TradingView's
+HTML not changing. The webhook costs a subscription and has neither problem.
 
 **3. Install the EA.** MetaEditor → open `mt5/TradingViewBridge.mq5` → Compile
 (F7) → drag onto any chart → enable AutoTrading. Point the server's `--queue`

@@ -204,13 +204,29 @@ def make_handler(cfg):
     class Handler(BaseHTTPRequestHandler):
         server_version = "QuantFlowBridge/1.0"
 
+        def _cors(self):
+            # The browser-extension sender posts JSON, which triggers a CORS
+            # preflight. Without these the extension path fails at the
+            # preflight and no alert ever arrives -- silently, which is the
+            # worst way for this to break.
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
         def _reply(self, code, msg):
             body = (msg + "\n").encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self._cors()
             self.end_headers()
             self.wfile.write(body)
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self._cors()
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def do_GET(self):
             if self.path.rstrip("/") in ("/health", ""):

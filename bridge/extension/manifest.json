@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "QuantFlow TradingView Bridge",
+  "version": "1.0.0",
+  "description": "Forwards TradingView alerts to a local MT5 bridge. Works without a paid TradingView plan, because it reads the alert off the page instead of using webhooks.",
+  "permissions": ["storage", "notifications"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://*.tradingview.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": { "default_title": "QuantFlow Bridge", "default_popup": "options.html" }
+}
