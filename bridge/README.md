@@ -99,6 +99,27 @@ Paste the JSON below into the message box and tick Webhook URL.
 fire time. For a strategy that already computes its own stop and target, emit
 those from Pine instead of hardcoding them.
 
+## Position sizing
+
+Set **Risk ($)** in the popup and leave the lot box alone. MT5 works out the
+lot size from your risk and your stop distance, using this broker's real
+contract specs for the symbol — tick value, contract size, account currency.
+That calculation cannot be done correctly in a browser, which knows none of
+those things.
+
+**Rounding is always DOWN**, and if the risk works out to less than the
+symbol's minimum lot, the EA **refuses the trade** and prints what the minimum
+would actually have risked. Trading the minimum "to be helpful" would risk
+more than you asked for, silently.
+
+⚠️ **`MaxLots` on the EA has to be big enough for the risk you want.** These
+interact in a way that is easy to miss: a tight stop needs a *large* lot size
+to risk a given amount. $100 over a 10-pip stop on EURNZD is roughly **1.7
+lots** — which the default `MaxLots = 0.10` will reject. Work out the biggest
+size your normal stop distance implies and set `MaxLots` a little above it.
+Keep it finite: it is the backstop against a malformed price producing an
+enormous position.
+
 ## The safety rails, and why each exists
 
 Both halves refuse independently. That is on purpose — the EA does not trust

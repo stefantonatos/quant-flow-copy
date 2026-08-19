@@ -68,13 +68,14 @@ ORDER_TYPES = ("market", "limit")
 
 class Config:
     def __init__(self, secret, symbols, queue_path, log_path,
-                 live=False, max_lots=0.10, dedupe_seconds=900):
+                 live=False, max_lots=0.10, max_risk=200.0, dedupe_seconds=900):
         self.secret = secret
         self.symbols = set(s.strip().upper() for s in symbols if s.strip())
         self.queue_path = queue_path
         self.log_path = log_path
         self.live = live
         self.max_lots = max_lots
+        self.max_risk = max_risk
         self.dedupe_seconds = dedupe_seconds
         self.seen = {}            # command id -> unix time first seen
 
@@ -152,15 +153,27 @@ def validate(cfg, data):
     price = num("price")
     sl = num("sl")
     tp = num("tp")
-    lots = num("lots", 0.01)
-    if None in (price, sl, tp, lots):
-        return None, "price/sl/tp/lots must be numeric"
+    lots = num("lots", 0.0)
+    risk = num("risk", 0.0)
+    if None in (price, sl, tp, lots, risk):
+        return None, "price/sl/tp/lots/risk must be numeric"
     if otype == "limit" and price <= 0:
         return None, "a limit order needs a positive price"
-    if lots <= 0:
-        return None, "lots must be positive"
-    if lots > cfg.max_lots:
+
+    # Position size comes from EITHER an explicit lot count OR a money risk
+    # that MT5 converts into lots. The conversion has to happen there: it
+    # needs the symbol's tick value, contract size and the account currency,
+    # none of which a browser knows. Guessing any of them would silently
+    # size the trade wrong.
+    if lots <= 0 and risk <= 0:
+        return None, "need either lots or risk (money to risk on the trade)"
+    if lots > 0 and lots > cfg.max_lots:
         return None, f"lots {lots} exceeds the server cap of {cfg.max_lots}"
+    if risk > 0:
+        if sl <= 0:
+            return None, "risk-based sizing needs a stop loss to size against"
+        if risk > cfg.max_risk:
+            return None, f"risk {risk} exceeds the server cap of {cfg.max_risk}"
 
     # A stop on the wrong side of entry is the single most expensive typo
     # available here: it converts a bracket into an instant loss, or into a
@@ -178,7 +191,7 @@ def validate(cfg, data):
             return None, f"sell target {tp} is not below entry {ref}"
 
     cmd.update({"side": side, "type": otype, "price": price,
-                "sl": sl, "tp": tp, "lots": lots,
+                "sl": sl, "tp": tp, "lots": lots, "risk": risk,
                 "comment": str(data.get("comment", ""))[:31]})
     return cmd, None
 
@@ -187,7 +200,7 @@ def to_queue_line(cmd):
     """Pipe-delimited key=value. MQL5 has no JSON parser worth the name, and
     StringSplit on this is four lines there instead of four hundred."""
     keys = ("id", "action", "symbol", "side", "type", "price", "sl", "tp",
-            "lots", "comment")
+            "lots", "risk", "comment")
     return "|".join(f"{k}={cmd.get(k, '')}" for k in keys)
 
 
@@ -289,6 +302,8 @@ def main(argv=None):
                     help="command queue the MT5 EA reads; point this at your terminal's MQL5/Files directory")
     ap.add_argument("--log", default="bridge/bridge.log")
     ap.add_argument("--max-lots", type=float, default=0.10)
+    ap.add_argument("--max-risk", type=float, default=200.0,
+                    help="hard cap on money risked per trade, for risk-based sizing")
     ap.add_argument("--live", action="store_true",
                     help="actually queue orders. Without this nothing is executed.")
     args = ap.parse_args(argv)
@@ -303,12 +318,13 @@ def main(argv=None):
         os.makedirs(d, exist_ok=True)
 
     cfg = Config(args.secret, args.symbols.split(","), args.queue, args.log,
-                 live=args.live, max_lots=args.max_lots)
+                 live=args.live, max_lots=args.max_lots, max_risk=args.max_risk)
 
     mode = "LIVE -- orders will be queued for execution" if cfg.live else \
            "DRY RUN -- commands are logged only, nothing will be executed"
     log(cfg, "START", f"{mode}; listening on {args.host}:{args.port}; "
-                      f"symbols={sorted(cfg.symbols) or 'ANY'}; max_lots={cfg.max_lots}")
+                      f"symbols={sorted(cfg.symbols) or 'ANY'}; "
+                      f"max_lots={cfg.max_lots}; max_risk={cfg.max_risk}")
     if not cfg.symbols:
         log(cfg, "WARN", "no symbol allowlist set -- any symbol in an alert will be accepted")
 

@@ -35,6 +35,13 @@ def order(**kw):
     return o
 
 
+def risk_order(**kw):
+    """Sized by money risked rather than an explicit lot count."""
+    o = order(lots=0, risk=100.0)
+    o.update(kw)
+    return o
+
+
 class TestAuth(unittest.TestCase):
 
     def test_valid_order_is_accepted(self):
@@ -155,6 +162,42 @@ class TestActions(unittest.TestCase):
         self.assertIsNone(validate(cfg(), order(type="iceberg"))[0])
 
 
+class TestRiskSizing(unittest.TestCase):
+    """Money-risk sizing. The lots themselves are computed in MT5, which is
+    the only place that knows tick value and account currency -- so what the
+    server must get right is refusing anything that would make that
+    calculation wrong or unbounded."""
+
+    def test_risk_without_lots_is_accepted(self):
+        cmd, reason = validate(cfg(), risk_order())
+        self.assertIsNotNone(cmd, reason)
+        self.assertEqual(cmd["risk"], 100.0)
+        self.assertEqual(cmd["lots"], 0)
+
+    def test_neither_lots_nor_risk_is_rejected(self):
+        cmd, reason = validate(cfg(), order(lots=0))
+        self.assertIsNone(cmd)
+        self.assertIn("lots or risk", reason)
+
+    def test_risk_without_a_stop_is_rejected(self):
+        """Sizing off a stop distance is impossible with no stop. Accepting
+        this would leave MT5 to invent a size."""
+        cmd, reason = validate(cfg(), risk_order(sl=0))
+        self.assertIsNone(cmd)
+        self.assertIn("stop loss", reason)
+
+    def test_risk_above_the_cap_is_rejected(self):
+        cmd, reason = validate(cfg(max_risk=200.0), risk_order(risk=5000))
+        self.assertIsNone(cmd)
+        self.assertIn("cap", reason)
+
+    def test_risk_travels_through_the_queue_line(self):
+        cmd, _ = validate(cfg(), risk_order())
+        fields = dict(p.split("=", 1) for p in to_queue_line(cmd).split("|"))
+        self.assertEqual(float(fields["risk"]), 100.0)
+        self.assertEqual(float(fields["lots"]), 0.0)
+
+
 class TestQueueFormat(unittest.TestCase):
 
     def test_line_is_pipe_delimited_and_parseable(self):
@@ -168,7 +211,7 @@ class TestQueueFormat(unittest.TestCase):
         self.assertEqual(fields["type"], "limit")
         self.assertEqual(float(fields["sl"]), 1.9550)
         for key in ("id", "action", "symbol", "side", "type", "price",
-                    "sl", "tp", "lots", "comment"):
+                    "sl", "tp", "lots", "risk", "comment"):
             self.assertIn(key, fields)
 
     def test_comment_cannot_break_the_delimiter(self):

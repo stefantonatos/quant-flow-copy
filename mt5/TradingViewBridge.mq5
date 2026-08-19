@@ -40,6 +40,7 @@ input string QueueFile      = "queue.txt";   // in MQL5/Files
 input string ProcessedFile  = "queue_done.txt";
 input bool   DryRun         = true;          // MUST be off for live orders
 input double MaxLots        = 0.10;          // hard cap, independent of the server's
+input double MaxRiskMoney   = 200.0;         // hard cap on money risked per trade
 input int    MaxSlippage    = 20;            // points
 input int    PollSeconds    = 2;
 input long   MagicNumber    = 20260817;
@@ -143,6 +144,49 @@ void OnTimer()
   }
 
 //+------------------------------------------------------------------+
+//| Convert a money risk into a lot size.                             |
+//|                                                                   |
+//| This calculation lives HERE and not in the browser because it     |
+//| needs the symbol's tick value and size and the account currency,  |
+//| which only the terminal knows. A browser guessing at those would  |
+//| silently size every trade wrong -- and wrong in a way that looks  |
+//| completely normal until the loss arrives.                         |
+//|                                                                   |
+//| Returns 0 when it cannot be computed. 0 means REFUSE, never       |
+//| "fall back to some default size".                                 |
+//+------------------------------------------------------------------+
+double LotsFromRisk(string symbol, double riskMoney, double entry, double sl)
+  {
+   if(riskMoney <= 0 || sl <= 0)
+      return 0;
+
+   double px = entry;
+   if(px <= 0)                       // market order: size against current price
+      px = SymbolInfoDouble(symbol, SYMBOL_BID);
+   if(px <= 0)
+      return 0;
+
+   double dist = MathAbs(px - sl);
+   if(dist <= 0)
+      return 0;
+
+   double tickSize  = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickSize <= 0 || tickValue <= 0)
+     {
+      PrintFormat("Cannot size %s: broker reports tickSize=%.10f tickValue=%.5f",
+                  symbol, tickSize, tickValue);
+      return 0;
+     }
+
+   double lossPerLot = (dist / tickSize) * tickValue;
+   if(lossPerLot <= 0)
+      return 0;
+
+   return riskMoney / lossPerLot;
+  }
+
+//+------------------------------------------------------------------+
 void Execute(string line)
   {
    string id     = GetField(line, "id");
@@ -154,6 +198,7 @@ void Execute(string line)
    double sl     = StringToDouble(GetField(line, "sl"));
    double tp     = StringToDouble(GetField(line, "tp"));
    double lots   = StringToDouble(GetField(line, "lots"));
+   double risk   = StringToDouble(GetField(line, "risk"));
    string cmt    = GetField(line, "comment");
 
    PrintFormat("CMD %s: %s %s %s %s lots=%.2f price=%s sl=%s tp=%s",
@@ -168,6 +213,35 @@ void Execute(string line)
       return;
      }
 
+   // Risk-based sizing: turn money into lots using this broker's actual
+   // contract specs for this symbol.
+   if(lots <= 0 && risk > 0)
+     {
+      if(risk > MaxRiskMoney)
+        {
+         PrintFormat("REJECT %s: risk %.2f exceeds EA cap %.2f", id, risk, MaxRiskMoney);
+         MarkProcessed(id, "reject:risk-cap");
+         return;
+        }
+      lots = LotsFromRisk(symbol, risk, price, sl);
+      if(lots <= 0)
+        {
+         PrintFormat("REJECT %s: could not size %s from risk %.2f (missing contract specs or zero stop distance)",
+                     id, symbol, risk);
+         MarkProcessed(id, "reject:cannot-size");
+         return;
+        }
+      PrintFormat("SIZING %s: risk %.2f over %.5f of stop distance -> %.4f lots (pre-rounding)",
+                  id, risk, MathAbs(price - sl), lots);
+     }
+
+   if(lots <= 0)
+     {
+      PrintFormat("REJECT %s: no lots and no usable risk", id);
+      MarkProcessed(id, "reject:no-size");
+      return;
+     }
+
    // Second, independent lot cap. The server has one too. This half of the
    // system spends money, so it does not trust its input.
    if(lots > MaxLots)
@@ -179,14 +253,24 @@ void Execute(string line)
 
    double minLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
    double lotStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   // Round DOWN, always. Rounding up would risk more than was asked for.
    if(lotStep > 0)
       lots = MathFloor(lots / lotStep) * lotStep;
    if(lots < minLot)
      {
-      PrintFormat("REJECT %s: lots %.4f below symbol minimum %.4f", id, lots, minLot);
+      // Refusing is the correct answer here, not trading the minimum. If the
+      // requested risk needs less than one minimum lot, then the minimum lot
+      // risks MORE than was asked -- silently, and by a factor the user never
+      // agreed to. Say the number out loud instead.
+      double wouldRisk = 0;
+      if(risk > 0 && lots > 0)
+         wouldRisk = risk * (minLot / lots);
+      PrintFormat("REJECT %s: %.4f lots is below the symbol minimum %.4f. Trading the minimum would risk about %.2f, not %.2f. Widen the stop, raise the risk, or trade a smaller-contract symbol.",
+                  id, lots, minLot, wouldRisk, risk);
       MarkProcessed(id, "reject:below-min-lot");
       return;
      }
+   PrintFormat("SIZE %s: %.2f lots", id, lots);
 
    if(DryRun)
      {

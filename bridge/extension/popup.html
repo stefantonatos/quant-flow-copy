@@ -37,8 +37,8 @@
       <select id="side"><option value="buy">Buy</option><option value="sell">Sell</option></select>
     </div>
     <div>
-      <label for="lots">Lots</label>
-      <input id="lots" type="text" placeholder="0.01">
+      <label for="risk">Risk ($)</label>
+      <input id="risk" type="text" placeholder="100">
     </div>
   </div>
 
@@ -51,6 +51,16 @@
   </div>
 
   <div class="rr" id="rr">Risk:reward —</div>
+  <div class="sub" style="margin-top:8px">
+    Lot size is worked out by MT5 from your risk and your stop distance,
+    using this broker's real contract specs. The exact size is printed in
+    MT5's <b>Experts</b> tab.
+  </div>
+  <details style="margin-top:8px">
+    <summary style="cursor:pointer;font-size:12px">Override lot size manually</summary>
+    <input id="lots" type="text" placeholder="leave blank to size from risk"
+           style="margin-top:6px">
+  </details>
 
   <button id="send">Send to MT5</button>
   <div id="status"></div>
