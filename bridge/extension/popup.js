@@ -73,74 +73,70 @@ function scrapeLevels() {
     if (m) out.symbol = m[1];
   }
 
-  const numsIn = (t) => {
-    const cleaned = String(t).replace(/[\u2212\u2013]/g, '-');
-    return (cleaned.match(/-?\d+(?:[.,]\d+)?/g) || [])
-      .map((x) => parseFloat(x.replace(',', '.')))
-      .filter((v) => isFinite(v));
+  /* Read each number from its OWN element.
+   *
+   * This is the thing three earlier attempts got wrong. TradingView renders
+   * every value in a separate element, and textContent on the row glues them
+   * together with no separator: entry 1.96706, stop 1.96603 and target
+   * 1.96812 arrive as the single string "1.967061.966031.96812". Any regex
+   * over that text produces confident garbage -- 966031.9681214 was a real
+   * reading. Walking to the leaf elements keeps the values apart, because
+   * the DOM already separates them. */
+  const leafNumbers = (root) => {
+    const found = [];
+    const walk = (el) => {
+      if (!el) return;
+      if (el.children.length === 0) {
+        const t = (el.textContent || '').trim();
+        if (/^-?\d+(?:[.,]\d+)?$/.test(t)) found.push(parseFloat(t.replace(',', '.')));
+        return;
+      }
+      for (const c of el.children) walk(c);
+    };
+    walk(root);
+    return found;
   };
 
-  /* Gather every element mentioning the indicator, plus each one's parent --
-   * TradingView splits the title and the values into separate siblings, so
-   * the text we want may only exist on an ancestor. */
-  const texts = [];
-  for (const el of document.querySelectorAll('*')) {
+  // Elements naming the indicator, smallest first.
+  const hits = [];
+  for (const el of document.querySelectorAll('div, span')) {
     const t = el.textContent || '';
-    if (!t || t.length > 1200) continue;
-    if (!/bridge/i.test(t)) continue;
-    texts.push(t);
-    if (el.parentElement) {
-      const pt = el.parentElement.textContent || '';
-      if (pt && pt.length <= 1200) texts.push(pt);
-    }
+    if (t && t.length <= 1200 && /bridge/i.test(t)) hits.push(el);
   }
-  out.candidates = texts.length;
-  if (!texts.length) return out;
+  out.candidates = hits.length;
+  hits.sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
 
-  /* PRIMARY: match the indicator's own signature directly.
-   *
-   * pine/bridge_levels.pine renders as "Bridge <mode> <side> <entry> <stop>
-   * <target> ..." -- the three numbers straight after the direction word are
-   * the levels. Anchoring on that shape is far steadier than counting from
-   * the end of a row, because it does not care what TradingView appends
-   * afterwards or how the row is split across elements. */
-  const sig = /bridge\s+\w+\s+(long|short)\s+(-?\d+(?:[.,]\d+)?)\s+(-?\d+(?:[.,]\d+)?)\s+(-?\d+(?:[.,]\d+)?)/i;
-  let matched = null;
-  for (const t of texts) {
-    const m = t.match(sig);
-    if (m) { matched = m; out.raw = t; break; }
+  /* From each hit, climb a few ancestors looking for the container that
+   * actually holds the plotted values as separate leaves. The name and the
+   * values are siblings, so the element matching "bridge" often holds none
+   * of the numbers itself. */
+  let nums = null;
+  let sideText = '';
+  for (const hit of hits) {
+    let el = hit;
+    for (let up = 0; up < 4 && el; up++, el = el.parentElement) {
+      const found = leafNumbers(el);
+      if (found.length >= 5) { nums = found; sideText = el.textContent || ''; break; }
+    }
+    if (nums) break;
   }
-  if (matched) {
-    const f = (x) => parseFloat(String(x).replace(',', '.'));
-    out.side  = matched[1].toLowerCase() === 'long' ? 'buy' : 'sell';
-    out.entry = f(matched[2]);
-    out.sl    = f(matched[3]);
-    out.tp    = f(matched[4]);
+
+  if (!nums) {
+    // Nothing with enough separate values; record what was seen for triage.
+    out.raw = hits.length ? (hits[0].textContent || '').slice(0, 300) : null;
     return out;
   }
 
-  /* FALLBACK: no signature match, so work from the shortest candidate row
-   * that carries enough numbers, taking the plotted tail. */
-  let best = null;
-  for (const t of texts) {
-    if (numsIn(t).length < 3) continue;
-    if (best === null || t.length < best.length) best = t;
-  }
-  if (best === null) return out;
-  out.raw = best;
-  const nums = numsIn(best);
-  if (nums.length >= 5) {
-    out.entry = nums[nums.length - 5];
-    out.sl    = nums[nums.length - 4];
-    out.tp    = nums[nums.length - 3];
-  } else {
-    out.entry = nums[nums.length - 3];
-    out.sl    = nums[nums.length - 2];
-    out.tp    = nums[nums.length - 1];
-  }
+  out.raw = nums.join(' , ');
 
-  if (/\blong\b/i.test(best)) out.side = 'buy';
-  else if (/\bshort\b/i.test(best)) out.side = 'sell';
+  /* The plotted tail is Entry, Stop, Target, Long, RR -- confirmed against a
+   * live chart -- so the levels are the fifth, fourth and third from the end. */
+  out.entry = nums[nums.length - 5];
+  out.sl    = nums[nums.length - 4];
+  out.tp    = nums[nums.length - 3];
+
+  if (/\blong\b/i.test(sideText)) out.side = 'buy';
+  else if (/\bshort\b/i.test(sideText)) out.side = 'sell';
   else if (out.entry != null && out.sl != null)
     out.side = out.sl < out.entry ? 'buy' : 'sell';
 
