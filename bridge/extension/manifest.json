@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "QuantFlow TradingView Bridge",
-  "version": "1.0.0",
+  "name": "QuantFlow TradingView Bridge v1.2",
+  "version": "1.2.0",
   "description": "Send a TradingView trade to MT5 as a pending limit order, sized from a fixed money risk. Works without a paid TradingView plan.",
   "permissions": [
     "storage",
