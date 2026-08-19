@@ -39,8 +39,17 @@
 input string QueueFile      = "queue.txt";   // in MQL5/Files
 input string ProcessedFile  = "queue_done.txt";
 input bool   DryRun         = true;          // MUST be off for live orders
-input double MaxLots        = 0.10;          // hard cap, independent of the server's
-input double MaxRiskMoney   = 200.0;         // hard cap on money risked per trade
+// MaxLots is a backstop against a malformed price producing an absurd
+// position -- it is NOT the risk control. With risk-based sizing the real
+// control is MaxRiskMoney, because that is the number denominated in the
+// thing you actually care about losing.
+//
+// The default here used to be 0.10, which quietly rejected ordinary trades:
+// a tight stop needs a LARGE lot size to risk a fixed amount. $100 over a
+// 10-pip EURNZD stop is about 1.7 lots. A cap below that is not caution, it
+// is a broken bridge that looks like caution.
+input double MaxLots        = 5.0;           // backstop vs. malformed prices
+input double MaxRiskMoney   = 200.0;         // THE risk control: max money per trade
 input int    MaxSlippage    = 20;            // points
 input int    PollSeconds    = 2;
 input long   MagicNumber    = 20260817;
