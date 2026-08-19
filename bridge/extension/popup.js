@@ -80,32 +80,55 @@ function scrapeLevels() {
       .filter((v) => isFinite(v));
   };
 
-  /* Collect EVERY element mentioning the indicator, then choose among them.
-   * Taking the first match was the bug: the legend nests a title-only
-   * element ("Bridge...") inside the row that carries the values, and in
-   * document order the title comes first -- so the reader kept landing on
-   * an element with no numbers in it and reporting failure.
-   *
-   * Prefer the SHORTEST text that still carries enough numbers: that is the
-   * tightest element wrapping the values, rather than some outer container
-   * that happens to include half the page. */
-  let best = null;
-  for (const el of document.querySelectorAll('div, span')) {
+  /* Gather every element mentioning the indicator, plus each one's parent --
+   * TradingView splits the title and the values into separate siblings, so
+   * the text we want may only exist on an ancestor. */
+  const texts = [];
+  for (const el of document.querySelectorAll('*')) {
     const t = el.textContent || '';
-    if (t.length > 600 || !/\bbridge\b/i.test(t)) continue;
+    if (!t || t.length > 1200) continue;
+    if (!/bridge/i.test(t)) continue;
+    texts.push(t);
+    if (el.parentElement) {
+      const pt = el.parentElement.textContent || '';
+      if (pt && pt.length <= 1200) texts.push(pt);
+    }
+  }
+  out.candidates = texts.length;
+  if (!texts.length) return out;
+
+  /* PRIMARY: match the indicator's own signature directly.
+   *
+   * pine/bridge_levels.pine renders as "Bridge <mode> <side> <entry> <stop>
+   * <target> ..." -- the three numbers straight after the direction word are
+   * the levels. Anchoring on that shape is far steadier than counting from
+   * the end of a row, because it does not care what TradingView appends
+   * afterwards or how the row is split across elements. */
+  const sig = /bridge\s+\w+\s+(long|short)\s+(-?\d+(?:[.,]\d+)?)\s+(-?\d+(?:[.,]\d+)?)\s+(-?\d+(?:[.,]\d+)?)/i;
+  let matched = null;
+  for (const t of texts) {
+    const m = t.match(sig);
+    if (m) { matched = m; out.raw = t; break; }
+  }
+  if (matched) {
+    const f = (x) => parseFloat(String(x).replace(',', '.'));
+    out.side  = matched[1].toLowerCase() === 'long' ? 'buy' : 'sell';
+    out.entry = f(matched[2]);
+    out.sl    = f(matched[3]);
+    out.tp    = f(matched[4]);
+    return out;
+  }
+
+  /* FALLBACK: no signature match, so work from the shortest candidate row
+   * that carries enough numbers, taking the plotted tail. */
+  let best = null;
+  for (const t of texts) {
     if (numsIn(t).length < 3) continue;
-    out.candidates++;
     if (best === null || t.length < best.length) best = t;
   }
   if (best === null) return out;
-
   out.raw = best;
   const nums = numsIn(best);
-
-  /* The row is: title, mode, side, the INPUT values, then the PLOTTED
-   * values. Confirmed against a real chart, the plotted tail is five
-   * numbers -- Entry, Stop, Target, Long, RR -- so the levels sit at
-   * [-5,-4,-3]. Narrower layouts may show only the three. */
   if (nums.length >= 5) {
     out.entry = nums[nums.length - 5];
     out.sl    = nums[nums.length - 4];
@@ -153,8 +176,12 @@ $('fill').onclick = async () => {
       $('status').style.color = '#c00';
       console.log('[QuantFlow Bridge] best legend row was:', res.raw);
     } else {
-      $('status').textContent = 'Could not find the Bridge Levels indicator on this chart.';
+      $('status').textContent =
+        `Could not read levels (checked ${res.candidates || 0} page elements). ` +
+        `Open the console for what it saw.`;
       $('status').style.color = '#c00';
+      console.log('[QuantFlow Bridge] candidates seen:', res.candidates,
+                  'best text:', res.raw);
     }
   } catch (e) {
     $('status').textContent = 'Read failed: ' + (e && e.message ? e.message : e);
