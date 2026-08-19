@@ -56,48 +56,68 @@ $('side').addEventListener('change', refreshRR);
 function scrapeLevels() {
   // Runs INSIDE the page. Must be entirely self-contained -- it cannot see
   // anything from popup.js's scope.
-  const out = { symbol: null, entry: null, sl: null, tp: null, side: null, raw: null };
+  const out = { symbol: null, entry: null, sl: null, tp: null, side: null,
+                raw: null, candidates: 0 };
 
-  const symEl = document.querySelector('[class*="symbolNameText"], [data-name="legend-source-title"]');
-  if (symEl) out.symbol = symEl.textContent.trim().toUpperCase();
+  /* Symbol from the URL, not the DOM. The chart URL carries
+   * ?symbol=OANDA%3AEURNZD, which is unambiguous; scraping the page found
+   * the first watchlist entry instead and confidently returned the wrong
+   * instrument -- the kind of error that places a real order on the wrong
+   * market. */
+  try {
+    const q = new URL(location.href).searchParams.get('symbol');
+    if (q) out.symbol = decodeURIComponent(q).split(':').pop().toUpperCase();
+  } catch (e) { /* fall through */ }
   if (!out.symbol) {
     const m = document.title.match(/^([A-Z0-9._!]+)/);
     if (m) out.symbol = m[1];
   }
 
-  const rows = document.querySelectorAll(
-    '[class*="valuesWrapper"], [class*="valuesAdditionalWrapper"], ' +
-    '[data-name="legend-source-item"], [class*="legend"] [class*="item"], div'
-  );
-  let text = null;
-  for (const row of rows) {
-    const t = row.textContent || '';
-    if (/\bbridge\b/i.test(t) && t.length < 400) { text = t; break; }
+  const numsIn = (t) => {
+    const cleaned = String(t).replace(/[\u2212\u2013]/g, '-');
+    return (cleaned.match(/-?\d+(?:[.,]\d+)?/g) || [])
+      .map((x) => parseFloat(x.replace(',', '.')))
+      .filter((v) => isFinite(v));
+  };
+
+  /* Collect EVERY element mentioning the indicator, then choose among them.
+   * Taking the first match was the bug: the legend nests a title-only
+   * element ("Bridge...") inside the row that carries the values, and in
+   * document order the title comes first -- so the reader kept landing on
+   * an element with no numbers in it and reporting failure.
+   *
+   * Prefer the SHORTEST text that still carries enough numbers: that is the
+   * tightest element wrapping the values, rather than some outer container
+   * that happens to include half the page. */
+  let best = null;
+  for (const el of document.querySelectorAll('div, span')) {
+    const t = el.textContent || '';
+    if (t.length > 600 || !/\bbridge\b/i.test(t)) continue;
+    if (numsIn(t).length < 3) continue;
+    out.candidates++;
+    if (best === null || t.length < best.length) best = t;
   }
-  if (!text) return out;
-  out.raw = text;
+  if (best === null) return out;
 
-  const cleaned = text.replace(/[\u2212\u2013]/g, '-');
-  const nums = (cleaned.match(/-?\d+(?:[.,]\d+)?/g) || [])
-    .map((x) => parseFloat(x.replace(',', '.')))
-    .filter((v) => isFinite(v));
+  out.raw = best;
+  const nums = numsIn(best);
 
-  /* The legend row is: title, mode, side, then the INPUT values, then the
-   * PLOTTED values. Confirmed from a real chart, the plotted tail is five
-   * numbers -- Entry, Stop, Target, Long, RR -- so entry/stop/target sit at
-   * [-5,-4,-3]. Older/narrower layouts may show only the three. */
+  /* The row is: title, mode, side, the INPUT values, then the PLOTTED
+   * values. Confirmed against a real chart, the plotted tail is five
+   * numbers -- Entry, Stop, Target, Long, RR -- so the levels sit at
+   * [-5,-4,-3]. Narrower layouts may show only the three. */
   if (nums.length >= 5) {
     out.entry = nums[nums.length - 5];
     out.sl    = nums[nums.length - 4];
     out.tp    = nums[nums.length - 3];
-  } else if (nums.length >= 3) {
+  } else {
     out.entry = nums[nums.length - 3];
     out.sl    = nums[nums.length - 2];
     out.tp    = nums[nums.length - 1];
   }
 
-  if (/\blong\b/i.test(text)) out.side = 'buy';
-  else if (/\bshort\b/i.test(text)) out.side = 'sell';
+  if (/\blong\b/i.test(best)) out.side = 'buy';
+  else if (/\bshort\b/i.test(best)) out.side = 'sell';
   else if (out.entry != null && out.sl != null)
     out.side = out.sl < out.entry ? 'buy' : 'sell';
 
@@ -131,7 +151,7 @@ $('fill').onclick = async () => {
     } else if (res.raw) {
       $('status').textContent = 'Found the indicator but could not read 3 levels from it.';
       $('status').style.color = '#c00';
-      console.log('[QuantFlow Bridge] legend row was:', res.raw);
+      console.log('[QuantFlow Bridge] best legend row was:', res.raw);
     } else {
       $('status').textContent = 'Could not find the Bridge Levels indicator on this chart.';
       $('status').style.color = '#c00';
