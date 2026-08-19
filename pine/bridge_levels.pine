@@ -46,9 +46,22 @@ mode = input.string("manual", "Levels from", options=["manual", "nowick", "asia"
      tooltip="manual = you type the numbers. nowick/asia = derived from that setup when it appears.")
 
 side      = input.string("long", "Direction", options=["long", "short"], group=grpTrade)
-manEntry  = input.price(0.0, "Entry",  group=grpTrade, confirm=true)
-manStop   = input.price(0.0, "Stop",   group=grpTrade, confirm=true)
-manTarget = input.price(0.0, "Target", group=grpTrade, confirm=true)
+
+// SETTING LEVELS AFTER THE FIRST TIME
+// You never need to delete and re-add this indicator. Double-click its name
+// in the chart legend (or click the gear icon on it) and edit these three
+// numbers, then OK. The plots, the boxes and the extension's read button all
+// follow immediately.
+//
+// `confirm` is deliberately OFF. With it on, TradingView demands you click
+// three prices on the chart every time the indicator loads, which is fine
+// once and tedious forever after. Off, the settings dialog is the single
+// place levels live -- type them, or use the price picker beside each field.
+manEntry  = input.price(0.0, "Entry",  group=grpTrade)
+manStop   = input.price(0.0, "Stop",   group=grpTrade)
+manTarget = input.price(0.0, "Target", group=grpTrade)
+clearAll  = input.bool(false, "Clear levels", group=grpTrade,
+     tooltip="Tick to blank the levels without deleting the indicator. The extension then reads nothing, so a stale setup cannot be sent by accident. Untick to bring them back.")
 
 atrLen        = input.int(14, "ATR Length", minval=1, group=grpTrade)
 stopBufferATR = input.float(0.50, "Stop buffer (x ATR, auto modes)", minval=0.01, step=0.05, group=grpTrade)
@@ -117,9 +130,16 @@ if mode == "asia" and not na(asiaHigh) and not na(asiaLow) and not na(atrVal) an
         autoLong  := false
 
 isLong = mode == "manual" ? side == "long" : autoLong
-entry  = mode == "manual" ? manEntry  : autoEntry
-stopPx = mode == "manual" ? manStop   : autoStop
-tgtPx  = mode == "manual" ? manTarget : autoTgt
+rawEntry = mode == "manual" ? manEntry  : autoEntry
+rawStop  = mode == "manual" ? manStop   : autoStop
+rawTgt   = mode == "manual" ? manTarget : autoTgt
+
+// "Clear levels" blanks everything. Publishing nothing is the safe state:
+// the extension reads no values, so an old setup cannot be sent by mistake
+// after you have moved on from it.
+entry  = clearAll ? na : rawEntry
+stopPx = clearAll ? na : rawStop
+tgtPx  = clearAll ? na : rawTgt
 
 // ============================================================================
 // THE INTERFACE -- LOAD-BEARING, DO NOT RENAME.
@@ -135,17 +155,17 @@ tgtPx  = mode == "manual" ? manTarget : autoTgt
 // separators ("1.967061.966031.96812"). Read the labelled elements, never the
 // text.
 // ============================================================================
-plot(entry  != 0 ? entry  : na, title="Entry",  color=color.new(color.white, 0),  linewidth=2, style=plot.style_linebr)
-plot(stopPx != 0 ? stopPx : na, title="Stop",   color=color.new(slColor, 0),      linewidth=1, style=plot.style_linebr)
-plot(tgtPx  != 0 ? tgtPx  : na, title="Target", color=color.new(tpColor, 0),      linewidth=1, style=plot.style_linebr)
+plot(not na(entry)  and entry  != 0 ? entry  : na, title="Entry",  color=color.new(color.white, 0),  linewidth=2, style=plot.style_linebr)
+plot(not na(stopPx) and stopPx != 0 ? stopPx : na, title="Stop",   color=color.new(slColor, 0),      linewidth=1, style=plot.style_linebr)
+plot(not na(tgtPx)  and tgtPx  != 0 ? tgtPx  : na, title="Target", color=color.new(tpColor, 0),      linewidth=1, style=plot.style_linebr)
 
 // Direction, so the extension can tell a long from a short without guessing
 // from the geometry. 1 = long, -1 = short.
-plot(entry != 0 ? (isLong ? 1 : -1) : na, title="Long", display=display.status_line)
+plot(not na(entry) and entry != 0 ? (isLong ? 1 : -1) : na, title="Long", display=display.status_line)
 
 // ---- risk:reward readout ---------------------------------------------------
-riskAmt   = entry != 0 and stopPx != 0 ? math.abs(entry - stopPx) : na
-rewardAmt = entry != 0 and tgtPx  != 0 ? math.abs(tgtPx - entry)  : na
+riskAmt   = not na(entry) and not na(stopPx) and entry != 0 and stopPx != 0 ? math.abs(entry - stopPx) : na
+rewardAmt = not na(entry) and not na(tgtPx) and entry != 0 and tgtPx  != 0 ? math.abs(tgtPx - entry)  : na
 rrValue   = not na(riskAmt) and riskAmt > 0 ? rewardAmt / riskAmt : na
 plot(rrValue, title="RR", display=display.status_line)
 
@@ -153,7 +173,7 @@ plot(rrValue, title="RR", display=display.status_line)
 var box tpB = na
 var box slB = na
 
-if showBox and entry != 0 and stopPx != 0 and tgtPx != 0
+if showBox and not na(entry) and not na(stopPx) and not na(tgtPx) and entry != 0 and stopPx != 0 and tgtPx != 0
     if not na(tpB)
         box.delete(tpB)
         box.delete(slB)
@@ -164,6 +184,6 @@ if showBox and entry != 0 and stopPx != 0 and tgtPx != 0
 
 // A wrong-side stop is the most expensive typo available here, so it is shown
 // on the chart rather than left to be discovered in a rejection log.
-badStop = entry != 0 and stopPx != 0 and
+badStop = not na(entry) and not na(stopPx) and entry != 0 and stopPx != 0 and
      ((isLong and stopPx >= entry) or (not isLong and stopPx <= entry))
 bgcolor(badStop ? color.new(color.red, 85) : na, title="Stop on the wrong side")
