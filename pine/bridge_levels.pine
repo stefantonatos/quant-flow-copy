@@ -47,19 +47,16 @@ mode = input.string("manual", "Levels from", options=["manual", "nowick", "asia"
 
 side      = input.string("long", "Direction", options=["long", "short"], group=grpTrade)
 
-// SETTING LEVELS AFTER THE FIRST TIME
-// You never need to delete and re-add this indicator. Double-click its name
-// in the chart legend (or click the gear icon on it) and edit these three
-// numbers, then OK. The plots, the boxes and the extension's read button all
-// follow immediately.
+// confirm=true ON PURPOSE: adding the indicator asks you to click the three
+// prices straight onto the chart, which is the whole point -- marking a setup
+// by eye, not typing decimals.
 //
-// `confirm` is deliberately OFF. With it on, TradingView demands you click
-// three prices on the chart every time the indicator loads, which is fine
-// once and tedious forever after. Off, the settings dialog is the single
-// place levels live -- type them, or use the price picker beside each field.
-manEntry  = input.price(0.0, "Entry",  group=grpTrade)
-manStop   = input.price(0.0, "Stop",   group=grpTrade)
-manTarget = input.price(0.0, "Target", group=grpTrade)
+// To re-place them without deleting the indicator, open its settings and use
+// the price picker beside each field (the small crosshair/target icon). That
+// gives the same click-on-chart behaviour on an indicator already loaded.
+manEntry  = input.price(0.0, "Entry",  group=grpTrade, confirm=true)
+manStop   = input.price(0.0, "Stop",   group=grpTrade, confirm=true)
+manTarget = input.price(0.0, "Target", group=grpTrade, confirm=true)
 clearAll  = input.bool(false, "Clear levels", group=grpTrade,
      tooltip="Tick to blank the levels without deleting the indicator. The extension then reads nothing, so a stale setup cannot be sent by accident. Untick to bring them back.")
 
