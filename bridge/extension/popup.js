@@ -97,48 +97,69 @@ function scrapeLevels() {
     return found;
   };
 
-  // Elements naming the indicator, smallest first.
+  // Every element naming the indicator, plus their ancestors.
   const hits = [];
   for (const el of document.querySelectorAll('div, span')) {
     const t = el.textContent || '';
     if (t && t.length <= 1200 && /bridge/i.test(t)) hits.push(el);
   }
   out.candidates = hits.length;
-  hits.sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
 
-  /* From each hit, climb a few ancestors looking for the container that
-   * actually holds the plotted values as separate leaves. The name and the
-   * values are siblings, so the element matching "bridge" often holds none
-   * of the numbers itself. */
+  /* Take the candidate with the MOST separate numeric leaves.
+   *
+   * Climbing to the FIRST ancestor with "enough" numbers was the last bug:
+   * it landed on the element holding only the indicator's INPUTS and read
+   * 14 / 0.5 / 1 -- the ATR length, the stop buffer and the RR setting --
+   * as if they were prices. The full legend row carries the inputs AND the
+   * plotted values, so it has strictly more leaves than either part alone,
+   * while the whole legend (all indicators) is excluded by the length cap.
+   * Maximising leaf count therefore lands on exactly the row wanted. */
   let nums = null;
   let sideText = '';
   for (const hit of hits) {
     let el = hit;
-    for (let up = 0; up < 4 && el; up++, el = el.parentElement) {
+    for (let up = 0; up < 5 && el; up++, el = el.parentElement) {
+      const t = el.textContent || '';
+      if (t.length > 1200 || !/bridge/i.test(t)) break;
       const found = leafNumbers(el);
-      if (found.length >= 5) { nums = found; sideText = el.textContent || ''; break; }
+      if (found.length >= 5 && (nums === null || found.length > nums.length)) {
+        nums = found;
+        sideText = t;
+      }
     }
-    if (nums) break;
   }
 
   if (!nums) {
-    // Nothing with enough separate values; record what was seen for triage.
     out.raw = hits.length ? (hits[0].textContent || '').slice(0, 300) : null;
     return out;
   }
 
+  /* The plotted tail is Entry, Stop, Target, Long, RR. */
+  const entry = nums[nums.length - 5];
+  const sl    = nums[nums.length - 4];
+  const tp    = nums[nums.length - 3];
   out.raw = nums.join(' , ');
 
-  /* The plotted tail is Entry, Stop, Target, Long, RR -- confirmed against a
-   * live chart -- so the levels are the fifth, fourth and third from the end. */
-  out.entry = nums[nums.length - 5];
-  out.sl    = nums[nums.length - 4];
-  out.tp    = nums[nums.length - 3];
+  /* SANITY CHECK. Three prices for one instrument sit close together; the
+   * indicator's settings do not. Both failures seen in practice -- reading
+   * 966031.9681214 from concatenated text, and reading 14/0.5/1 from the
+   * settings -- are caught by this, and neither was obvious on screen. A
+   * scraper reading somebody else's page can always start returning
+   * plausible-looking rubbish, so refusing is safer than displaying. */
+  const vals = [entry, sl, tp].filter((v) => typeof v === 'number' && isFinite(v) && v > 0);
+  if (vals.length < 3) { out.implausible = true; return out; }
+  if (Math.max(...vals) / Math.min(...vals) > 1.5) {
+    out.implausible = true;
+    return out;
+  }
+
+  out.entry = entry;
+  out.sl = sl;
+  out.tp = tp;
 
   if (/\blong\b/i.test(sideText)) out.side = 'buy';
   else if (/\bshort\b/i.test(sideText)) out.side = 'sell';
-  else if (out.entry != null && out.sl != null)
-    out.side = out.sl < out.entry ? 'buy' : 'sell';
+  else out.side = sl < entry ? 'buy' : 'sell';
 
   return out;
 }
@@ -167,6 +188,12 @@ $('fill').onclick = async () => {
     if (got.length === 3) {
       $('status').textContent = 'Read entry, stop and target. Check them against the chart.';
       $('status').style.color = '#0a0';
+    } else if (res.implausible) {
+      $('status').textContent =
+        'Read numbers that do not look like prices — ignoring them. Type the ' +
+        'levels in manually.';
+      $('status').style.color = '#c00';
+      console.log('[QuantFlow Bridge] rejected as implausible:', res.raw);
     } else if (res.raw) {
       $('status').textContent = 'Found the indicator but could not read 3 levels from it.';
       $('status').style.color = '#c00';
