@@ -272,7 +272,12 @@ def make_handler(cfg):
             if cmd is None:
                 redacted = {k: v for k, v in data.items() if k != "secret"}
                 log(cfg, "REJECT", reason, redacted)
-                self._reply(400, "rejected")
+                # Return the reason ONLY once the secret has checked out. A
+                # caller who cannot authenticate learns nothing; a caller who
+                # can is the operator, and hiding why their own trade was
+                # refused just sends them digging through logs.
+                authed = str(data.get("secret", "")) == cfg.secret
+                self._reply(400, reason if authed else "rejected")
                 return
 
             cfg.seen[cmd["id"]] = time.time()
