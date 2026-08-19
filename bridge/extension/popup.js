@@ -54,16 +54,12 @@ $('side').addEventListener('change', refreshRR);
  * moment it is needed.
  */
 function scrapeLevels() {
-  // Runs INSIDE the page. Must be entirely self-contained -- it cannot see
-  // anything from popup.js's scope.
+  // Runs INSIDE the page. Must be entirely self-contained.
   const out = { symbol: null, entry: null, sl: null, tp: null, side: null,
-                raw: null, candidates: 0 };
+                raw: null, candidates: 0, implausible: false };
 
-  /* Symbol from the URL, not the DOM. The chart URL carries
-   * ?symbol=OANDA%3AEURNZD, which is unambiguous; scraping the page found
-   * the first watchlist entry instead and confidently returned the wrong
-   * instrument -- the kind of error that places a real order on the wrong
-   * market. */
+  /* Symbol from the URL. Scraping it from the page once returned the first
+   * watchlist entry instead of the chart's own instrument. */
   try {
     const q = new URL(location.href).searchParams.get('symbol');
     if (q) out.symbol = decodeURIComponent(q).split(':').pop().toUpperCase();
@@ -73,82 +69,54 @@ function scrapeLevels() {
     if (m) out.symbol = m[1];
   }
 
-  /* Read each number from its OWN element.
+  /* THE ANCHOR.
    *
-   * This is the thing three earlier attempts got wrong. TradingView renders
-   * every value in a separate element, and textContent on the row glues them
-   * together with no separator: entry 1.96706, stop 1.96603 and target
-   * 1.96812 arrive as the single string "1.967061.966031.96812". Any regex
-   * over that text produces confident garbage -- 966031.9681214 was a real
-   * reading. Walking to the leaf elements keeps the values apart, because
-   * the DOM already separates them. */
-  const leafNumbers = (root) => {
-    const found = [];
-    const walk = (el) => {
-      if (!el) return;
-      if (el.children.length === 0) {
-        const t = (el.textContent || '').trim();
-        if (/^-?\d+(?:[.,]\d+)?$/.test(t)) found.push(parseFloat(t.replace(',', '.')));
-        return;
-      }
-      for (const c of el.children) walk(c);
-    };
-    walk(root);
-    return found;
+   * TradingView tags every plotted value with its plot title:
+   *   <div data-test-id-value-title="Entry" class="valueItem-...">
+   * so each value can be addressed by name. Four earlier attempts parsed the
+   * legend's text instead -- matching words, counting numbers from the end,
+   * regexing the row -- and all of them were guessing, because the rendered
+   * text runs the values together with no separators
+   * ("1.967061.966031.96812"). Reading the labelled elements needs no
+   * guessing at all, and does not care how many inputs the script has or
+   * what order they appear in.
+   *
+   * The plot titles in pine/bridge_levels.pine (Entry / Stop / Target /
+   * Long / RR) are therefore a load-bearing interface. Renaming a plot there
+   * breaks this. */
+  const items = document.querySelectorAll('[data-qa-id="legend-source-item"]');
+  out.candidates = items.length;
+  let item = null;
+  for (const it of items) {
+    const titleEl = it.querySelector('[data-qa-id~="legend-source-title"]');
+    const name = titleEl
+      ? (titleEl.getAttribute('title') || titleEl.textContent || '')
+      : (it.textContent || '');
+    if (/bridge/i.test(name)) { item = it; break; }
+  }
+  if (!item) return out;
+
+  const readVal = (name) => {
+    const el = item.querySelector('[data-test-id-value-title="' + name + '"]');
+    if (!el) return null;
+    const m = (el.textContent || '').replace(/[\u2212\u2013]/g, '-')
+                .match(/-?\d+(?:[.,]\d+)?/);
+    return m ? parseFloat(m[0].replace(',', '.')) : null;
   };
 
-  // Every element naming the indicator, plus their ancestors.
-  const hits = [];
-  for (const el of document.querySelectorAll('div, span')) {
-    const t = el.textContent || '';
-    if (t && t.length <= 1200 && /bridge/i.test(t)) hits.push(el);
-  }
-  out.candidates = hits.length;
+  const entry = readVal('Entry');
+  const sl    = readVal('Stop');
+  const tp    = readVal('Target');
+  const long  = readVal('Long');
+  out.raw = `Entry=${entry} Stop=${sl} Target=${tp} Long=${long}`;
 
-  /* Take the candidate with the MOST separate numeric leaves.
-   *
-   * Climbing to the FIRST ancestor with "enough" numbers was the last bug:
-   * it landed on the element holding only the indicator's INPUTS and read
-   * 14 / 0.5 / 1 -- the ATR length, the stop buffer and the RR setting --
-   * as if they were prices. The full legend row carries the inputs AND the
-   * plotted values, so it has strictly more leaves than either part alone,
-   * while the whole legend (all indicators) is excluded by the length cap.
-   * Maximising leaf count therefore lands on exactly the row wanted. */
-  let nums = null;
-  let sideText = '';
-  for (const hit of hits) {
-    let el = hit;
-    for (let up = 0; up < 5 && el; up++, el = el.parentElement) {
-      const t = el.textContent || '';
-      if (t.length > 1200 || !/bridge/i.test(t)) break;
-      const found = leafNumbers(el);
-      if (found.length >= 5 && (nums === null || found.length > nums.length)) {
-        nums = found;
-        sideText = t;
-      }
-    }
-  }
+  if (entry == null || sl == null || tp == null) return out;
 
-  if (!nums) {
-    out.raw = hits.length ? (hits[0].textContent || '').slice(0, 300) : null;
-    return out;
-  }
-
-  /* The plotted tail is Entry, Stop, Target, Long, RR. */
-  const entry = nums[nums.length - 5];
-  const sl    = nums[nums.length - 4];
-  const tp    = nums[nums.length - 3];
-  out.raw = nums.join(' , ');
-
-  /* SANITY CHECK. Three prices for one instrument sit close together; the
-   * indicator's settings do not. Both failures seen in practice -- reading
-   * 966031.9681214 from concatenated text, and reading 14/0.5/1 from the
-   * settings -- are caught by this, and neither was obvious on screen. A
-   * scraper reading somebody else's page can always start returning
-   * plausible-looking rubbish, so refusing is safer than displaying. */
-  const vals = [entry, sl, tp].filter((v) => typeof v === 'number' && isFinite(v) && v > 0);
-  if (vals.length < 3) { out.implausible = true; return out; }
-  if (Math.max(...vals) / Math.min(...vals) > 1.5) {
+  /* Kept as a backstop even now that the read is exact: three prices for one
+   * instrument sit close together. If TradingView ever changes these
+   * attributes, this is what stops a wrong reading from reaching an order. */
+  const vals = [entry, sl, tp].filter((v) => isFinite(v) && v > 0);
+  if (vals.length < 3 || Math.max(...vals) / Math.min(...vals) > 1.5) {
     out.implausible = true;
     return out;
   }
@@ -156,11 +124,8 @@ function scrapeLevels() {
   out.entry = entry;
   out.sl = sl;
   out.tp = tp;
-
-  if (/\blong\b/i.test(sideText)) out.side = 'buy';
-  else if (/\bshort\b/i.test(sideText)) out.side = 'sell';
-  else out.side = sl < entry ? 'buy' : 'sell';
-
+  out.side = (long != null) ? (long > 0 ? 'buy' : 'sell')
+                            : (sl < entry ? 'buy' : 'sell');
   return out;
 }
 

@@ -122,9 +122,18 @@ stopPx = mode == "manual" ? manStop   : autoStop
 tgtPx  = mode == "manual" ? manTarget : autoTgt
 
 // ============================================================================
-// THE INTERFACE. These three plot titles are read by the browser extension's
-// "Read levels from chart" button, which matches on the words Entry / Stop /
-// Target in the status line. Rename them and that button stops working.
+// THE INTERFACE -- LOAD-BEARING, DO NOT RENAME.
+//
+// TradingView renders each plotted value into the legend tagged with its plot
+// title:  <div data-test-id-value-title="Entry" ...>
+// The browser extension addresses the values by exactly those names, so these
+// five titles are an API between this file and bridge/extension/popup.js.
+// Renaming any of them silently breaks the "Read levels from chart" button.
+//
+// Four earlier versions of that reader tried to parse the legend's TEXT
+// instead and all failed, because TradingView concatenates the values with no
+// separators ("1.967061.966031.96812"). Read the labelled elements, never the
+// text.
 // ============================================================================
 plot(entry  != 0 ? entry  : na, title="Entry",  color=color.new(color.white, 0),  linewidth=2, style=plot.style_linebr)
 plot(stopPx != 0 ? stopPx : na, title="Stop",   color=color.new(slColor, 0),      linewidth=1, style=plot.style_linebr)
