@@ -267,3 +267,81 @@ chrome.storage.local.get({ risk: '100' }, (cfg) => { $('risk').value = cfg.risk;
 $('risk').addEventListener('change', () => {
   chrome.storage.local.set({ risk: $('risk').value.trim() });
 });
+
+
+/* ---------------------------------------------------------------------------
+ * Diagnostics.
+ *
+ * Four attempts at reading the legend failed because they were written
+ * against guessed markup. This dumps the real structure so a selector can be
+ * written from evidence instead: for every element naming the indicator, its
+ * tag, classes, data-* attributes and immediate children with their own text.
+ * Copy the result, and the reader can be pinned to a stable anchor rather
+ * than to text position, which is what has been breaking.
+ * ------------------------------------------------------------------------ */
+function dumpBridgeDom() {
+  const lines = [];
+  const attrs = (el) => {
+    const out = [];
+    for (const a of el.attributes || []) {
+      if (a.name === 'class' || a.name.startsWith('data-') || a.name === 'title')
+        out.push(`${a.name}="${String(a.value).slice(0, 90)}"`);
+    }
+    return out.join(' ');
+  };
+  const describe = (el, depth) => {
+    const pad = '  '.repeat(depth);
+    const own = el.children.length === 0 ? ` TEXT="${(el.textContent || '').trim().slice(0, 40)}"` : '';
+    return `${pad}<${el.tagName.toLowerCase()} ${attrs(el)}>${own}`;
+  };
+
+  const seen = new Set();
+  let n = 0;
+  for (const el of document.querySelectorAll('div, span')) {
+    const t = el.textContent || '';
+    if (!/bridge/i.test(t) || t.length > 400) continue;
+    if (n++ > 6) break;
+
+    // Climb to a row-level ancestor, then print that subtree.
+    let root = el;
+    for (let i = 0; i < 3 && root.parentElement; i++) {
+      const pt = root.parentElement.textContent || '';
+      if (pt.length > 900) break;
+      root = root.parentElement;
+    }
+    if (seen.has(root)) continue;
+    seen.add(root);
+
+    lines.push(`=== CANDIDATE ${n} (root text len ${(root.textContent || '').length}) ===`);
+    lines.push(describe(root, 0));
+    const walk = (parent, depth) => {
+      if (depth > 3) return;
+      for (const c of parent.children) {
+        lines.push(describe(c, depth));
+        walk(c, depth + 1);
+      }
+    };
+    walk(root, 1);
+    lines.push(`FULL TEXT: ${(root.textContent || '').slice(0, 300)}`);
+    lines.push('');
+  }
+  return lines.join('\n') || 'no elements matched "bridge"';
+}
+
+$('diag').onclick = async () => {
+  $('status').textContent = 'Collecting...';
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id }, func: dumpBridgeDom
+    });
+    const text = (results && results[0] && results[0].result) || 'nothing returned';
+    await navigator.clipboard.writeText(text);
+    $('status').textContent = 'Copied to clipboard — paste it to Claude.';
+    $('status').style.color = '#0a0';
+    console.log(text);
+  } catch (e) {
+    $('status').textContent = 'Diagnostics failed: ' + (e && e.message ? e.message : e);
+    $('status').style.color = '#c00';
+  }
+};
