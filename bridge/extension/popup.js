@@ -310,3 +310,65 @@ $('diag').onclick = async () => {
     $('status').style.color = '#c00';
   }
 };
+
+
+/* ---------------------------------------------------------------------------
+ * Reset: remove the indicator so it can be re-added and re-clicked.
+ *
+ * Pine cannot re-trigger a confirm=true input -- TradingView only asks for
+ * those when a study is first added. So the only route back to click-to-place
+ * is removing the indicator and adding it again.
+ *
+ * This does the removal half, using the delete button TradingView puts on the
+ * legend row (data-qa-id="legend-delete-action", confirmed from a DOM dump of
+ * the real chart rather than guessed). Re-adding is left to the user's
+ * favourites, because automating the Indicators dialog would mean writing
+ * selectors for markup nobody has looked at -- which is exactly the mistake
+ * that cost four attempts on the reader.
+ * ------------------------------------------------------------------------ */
+function removeBridgeIndicator() {
+  const items = document.querySelectorAll('[data-qa-id="legend-source-item"]');
+  for (const it of items) {
+    const titleEl = it.querySelector('[data-qa-id~="legend-source-title"]');
+    const name = titleEl
+      ? (titleEl.getAttribute('title') || titleEl.textContent || '')
+      : (it.textContent || '');
+    if (!/bridge/i.test(name)) continue;
+
+    const del = it.querySelector('[data-qa-id="legend-delete-action"]');
+    if (!del) return { ok: false, reason: 'found the indicator but not its remove button' };
+    del.click();
+    return { ok: true, name: name.trim() };
+  }
+  return { ok: false, reason: 'Bridge Levels is not on this chart' };
+}
+
+$('reset').onclick = async () => {
+  $('status').textContent = 'Removing...';
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !/tradingview\.com/.test(tab.url || '')) {
+      $('status').textContent = 'Open your TradingView chart first.';
+      $('status').style.color = '#c00';
+      return;
+    }
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id }, func: removeBridgeIndicator
+    });
+    const res = (results && results[0] && results[0].result) || {};
+    if (res.ok) {
+      // Clear the form too: leaving the old numbers sitting there invites
+      // sending a setup whose indicator has just been deleted.
+      for (const k of ['entry', 'sl', 'tp']) $(k).value = '';
+      refreshRR();
+      $('status').textContent = 'Removed. Now add Bridge Levels again — it will ask you to click the three prices.';
+      $('status').style.color = '#0a0';
+    } else {
+      $('status').textContent = res.reason || 'Could not remove it.';
+      $('status').style.color = '#c00';
+    }
+  } catch (e) {
+    $('status').textContent = 'Reset failed: ' + (e && e.message ? e.message : e);
+    $('status').style.color = '#c00';
+  }
+};
