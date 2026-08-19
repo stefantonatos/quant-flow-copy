@@ -16,8 +16,14 @@ REM ---------------------------------------------------------------------------
 REM The shared secret. Must match what you typed into the extension's Settings.
 set SECRET=bananabread12345
 
-REM Which symbols the bridge is allowed to trade. Comma separated, no spaces.
-set SYMBOLS=EURNZD
+REM Which symbols the bridge may trade. Leave EMPTY to allow whatever chart
+REM you are on -- the symbol is read from the chart's URL, so it follows you
+REM around TradingView. Fill it in (comma separated, no spaces) if you would
+REM rather the bridge refuse everything except a named few.
+REM
+REM Broker naming differs from TradingView's: the EA resolves EURNZD to
+REM EURNZD.raw, EURNZDm and similar automatically, and prints what it picked.
+set SYMBOLS=
 
 REM Your MT5 queue file. This is the terminal folder MT5 showed you under
 REM File -> Open Data Folder, with \MQL5\Files\queue.txt on the end.

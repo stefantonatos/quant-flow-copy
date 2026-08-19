@@ -331,7 +331,10 @@ def main(argv=None):
                       f"symbols={sorted(cfg.symbols) or 'ANY'}; "
                       f"max_lots={cfg.max_lots}; max_risk={cfg.max_risk}")
     if not cfg.symbols:
-        log(cfg, "WARN", "no symbol allowlist set -- any symbol in an alert will be accepted")
+        log(cfg, "WARN", "no symbol allowlist -- any symbol will be accepted. "
+                         "Fine for following whatever chart you are on; the EA still "
+                         "refuses symbols your broker does not offer, and the popup "
+                         "shows you the symbol before you send.")
 
     httpd = HTTPServer((args.host, args.port), make_handler(cfg))
     try:

@@ -149,6 +149,14 @@ the server, because the EA is the half that spends money.
   sits in TradingView's settings and travels the open internet. Without a
   secret, anyone who learns it can trade your account.
 - **Symbol allowlist.** An alert naming a symbol you never approved is dropped.
+  Leave `--symbols` empty to trade whatever chart you are on: the symbol comes
+  from the chart URL, so it follows you around TradingView. Two things still
+  stand behind that -- the popup shows you the symbol before you send, and the
+  EA refuses anything your broker does not offer.
+- **Broker symbol names.** TradingView's `EURNZD` may be `EURNZD.raw`,
+  `EURNZDm` or similar at your broker. The EA matches exactly first, then by
+  prefix, and prints which instrument it resolved to. Read that line: trading
+  a symbol you did not name is not something to discover later.
 - **Two independent lot caps**, server and EA.
 - **Stop-direction check.** A buy whose stop is above entry is refused. That
   single typo turns a bracket into an instant loss or an unprotected position,

@@ -153,6 +153,47 @@ void OnTimer()
   }
 
 //+------------------------------------------------------------------+
+//| Find the broker's name for a TradingView symbol.                  |
+//|                                                                   |
+//| These rarely match exactly. TradingView says EURNZD; brokers ship |
+//| EURNZD.raw, EURNZDm, EURNZD-ECN and so on, and metals and indices |
+//| are worse. An exact-match-only bridge silently refuses every       |
+//| trade on such an account and looks broken.                        |
+//|                                                                   |
+//| Exact match first, then a prefix match across the broker's symbol  |
+//| list. Whatever it resolves to is printed, because quietly trading  |
+//| a symbol the user did not name is not acceptable -- they need to   |
+//| see which instrument this actually is.                             |
+//+------------------------------------------------------------------+
+string ResolveSymbol(string want)
+  {
+   if(want == "")
+      return "";
+   if(SymbolSelect(want, true))
+      return want;
+
+   string upperWant = want;
+   StringToUpper(upperWant);
+
+   int total = SymbolsTotal(false);
+   for(int i = 0; i < total; i++)
+     {
+      string s = SymbolName(i, false);
+      string upperS = s;
+      StringToUpper(upperS);
+      if(StringFind(upperS, upperWant) == 0)     // broker name starts with it
+        {
+         if(SymbolSelect(s, true))
+           {
+            PrintFormat("Symbol %s not found; using broker symbol %s", want, s);
+            return s;
+           }
+        }
+     }
+   return "";
+  }
+
+//+------------------------------------------------------------------+
 //| Convert a money risk into a lot size.                             |
 //|                                                                   |
 //| This calculation lives HERE and not in the browser because it     |
@@ -215,12 +256,14 @@ void Execute(string line)
                DoubleToString(price, _Digits), DoubleToString(sl, _Digits),
                DoubleToString(tp, _Digits));
 
-   if(!SymbolSelect(symbol, true))
+   string resolved = ResolveSymbol(symbol);
+   if(resolved == "")
      {
-      PrintFormat("REJECT %s: symbol %s is not available in this terminal", id, symbol);
+      PrintFormat("REJECT %s: no symbol matching %s is available at this broker", id, symbol);
       MarkProcessed(id, "reject:unknown-symbol");
       return;
      }
+   symbol = resolved;
 
    // Risk-based sizing: turn money into lots using this broker's actual
    // contract specs for this symbol.
