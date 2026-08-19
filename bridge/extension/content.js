@@ -167,7 +167,19 @@ function readLevels() {
    * ALWAYS shown to the user to check before sending, never sent blind. */
   if (out.entry == null || out.sl == null || out.tp == null) {
     const nums = allNumbers(text);
-    if (nums.length >= 3) {
+    /* CONFIRMED from a live screenshot of the actual legend row:
+     * "...82  1.96706  1.96603  1.96812  1.00000  1.02061" -- the tail is
+     * FIVE numbers, not three. pine/bridge_levels.pine's status_line-only
+     * plots (Long, RR) DO render into this same text, contrary to the
+     * earlier assumption that display.status_line keeps them out of it.
+     * The trailing five are, in order: Entry, Stop, Target, Long, RR --
+     * so Entry/Stop/Target are indices [-5, -4, -3], not the last three. */
+    if (nums.length >= 5) {
+      const [e, s, t] = nums.slice(-5, -2);
+      if (out.entry == null) out.entry = e;
+      if (out.sl == null) out.sl = s;
+      if (out.tp == null) out.tp = t;
+    } else if (nums.length >= 3) {
       const [e, s, t] = nums.slice(-3);
       if (out.entry == null) out.entry = e;
       if (out.sl == null) out.sl = s;
