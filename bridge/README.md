@@ -27,6 +27,22 @@ They talk through a plain text file. That is deliberate: you can open it in
 Notepad mid-run, see exactly what was asked for, and delete a line to cancel
 it. Nothing about a socket would be better here, and a lot would be worse.
 
+## Quick start (Windows)
+
+Double-click **`start_bridge.bat`** in the repo root. It starts the server,
+opens your chart in Brave, and launches MT5. Edit the settings block at the top
+of that file once — secret, symbols, your MT5 queue path, and which chart to
+open — and after that it is one click.
+
+It refuses to start silently when something is wrong: no Python, no bridge
+folder, or an MT5 queue path that does not exist. That last check matters more
+than it looks — a wrong queue path means the server cheerfully writes orders
+into a folder MT5 never reads, and nothing appears broken until you notice no
+trades are being placed.
+
+Make a desktop shortcut: right-click `start_bridge.bat` → Show more options →
+Send to → Desktop.
+
 ## Setup
 
 **1. Start the receiver** (leave dry-run on to begin with — no `--live`):
