@@ -127,9 +127,37 @@ if mode == "asia" and not na(asiaHigh) and not na(asiaLow) and not na(atrVal) an
         autoLong  := false
 
 isLong = mode == "manual" ? side == "long" : autoLong
-rawEntry = mode == "manual" ? manEntry  : autoEntry
-rawStop  = mode == "manual" ? manStop   : autoStop
-rawTgt   = mode == "manual" ? manTarget : autoTgt
+
+// ---------------------------------------------------------------------------
+// STALE LEVELS FROM ANOTHER SYMBOL
+//
+// Switch this chart from EURNZD (1.96) to XAUUSD (3000) and the manual levels
+// stay where they were -- far off-screen, and impossible to drag back because
+// you cannot grab a line you cannot see. That makes the indicator feel broken
+// on every pair except the one it was placed on.
+//
+// So: if the stored levels are nowhere near this symbol's price, they came
+// from a different instrument. Ignore them and put the lines at the current
+// price instead, where they are visible and can be dragged into place. The
+// stored numbers are untouched -- switch back and they are still there.
+// ---------------------------------------------------------------------------
+fitsSymbol(float px) =>
+    not na(px) and px > 0 and px < close * 2.0 and px > close * 0.5
+
+levelsFit = fitsSymbol(manEntry) and fitsSymbol(manStop) and fitsSymbol(manTarget)
+
+atrNow  = na(atrVal) or atrVal <= 0 ? close * 0.001 : atrVal
+fallStop = isLong ? close - stopBufferATR * atrNow : close + stopBufferATR * atrNow
+fallRisk = math.abs(close - fallStop)
+fallTgt  = isLong ? close + rr * fallRisk : close - rr * fallRisk
+
+manualEntry = levelsFit ? manEntry  : close
+manualStop  = levelsFit ? manStop   : fallStop
+manualTgt   = levelsFit ? manTarget : fallTgt
+
+rawEntry = mode == "manual" ? manualEntry : autoEntry
+rawStop  = mode == "manual" ? manualStop  : autoStop
+rawTgt   = mode == "manual" ? manualTgt   : autoTgt
 
 // "Clear levels" blanks everything. Publishing nothing is the safe state:
 // the extension reads no values, so an old setup cannot be sent by mistake
@@ -184,3 +212,14 @@ if showBox and not na(entry) and not na(stopPx) and not na(tgtPx) and entry != 0
 badStop = not na(entry) and not na(stopPx) and entry != 0 and stopPx != 0 and
      ((isLong and stopPx >= entry) or (not isLong and stopPx <= entry))
 bgcolor(badStop ? color.new(color.red, 85) : na, title="Stop on the wrong side")
+
+// A snapped level must never be mistaken for one you placed deliberately.
+var label fitLbl = na
+if barstate.islast
+    if not na(fitLbl)
+        label.delete(fitLbl)
+    if mode == "manual" and not levelsFit and not clearAll
+        fitLbl := label.new(bar_index, high,
+             "Levels were from another symbol — snapped to price. Drag to place.",
+             style=label.style_label_down, color=color.new(color.orange, 20),
+             textcolor=color.white, size=size.small)
