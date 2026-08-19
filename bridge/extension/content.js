@@ -112,6 +112,12 @@ function parseNum(text) {
   return isFinite(v) ? v : null;
 }
 
+function allNumbers(text) {
+  const cleaned = String(text).replace(/[\u2212\u2013]/g, '-');
+  const matches = cleaned.match(/-?\d+(?:[.,]\d+)?/g) || [];
+  return matches.map((m) => parseFloat(m.replace(',', '.'))).filter((v) => isFinite(v));
+}
+
 function readLevels() {
   const out = { symbol: null, entry: null, sl: null, tp: null, side: null };
 
@@ -122,32 +128,56 @@ function readLevels() {
     if (m) out.symbol = m[1];
   }
 
-  /* Walk every legend/status-line row and match on the plot's TITLE. Matching
-   * by title rather than by position means an extra plot in the indicator
-   * cannot silently shift which number lands in which field. */
+  /* Find the "Bridge Levels" indicator's own legend row -- scoped by its
+   * shorttitle so this cannot accidentally read some other indicator's
+   * numbers off the chart. */
   const rows = document.querySelectorAll(
-    '[class*="valuesWrapper"], [class*="valuesAdditionalWrapper"], [data-name="legend-source-item"]'
+    '[class*="valuesWrapper"], [class*="valuesAdditionalWrapper"], ' +
+    '[data-name="legend-source-item"], [class*="legend"] [class*="item"]'
   );
+  let bridgeRow = null;
   for (const row of rows) {
-    const text = row.textContent || '';
-    for (const [key, re] of [
-      ['entry', /entry/i],
-      ['sl', /\b(stop|sl)\b/i],
-      ['tp', /\b(target|tp|take\s*profit)\b/i]
-    ]) {
-      if (out[key] == null && re.test(text)) {
-        const after = text.split(re)[1] || text;
-        const v = parseNum(after);
-        if (v != null) out[key] = v;
-      }
-    }
-    if (out.side == null) {
-      if (/\blong\b/i.test(text)) out.side = 'buy';
-      else if (/\bshort\b/i.test(text)) out.side = 'sell';
+    if (/\bbridge\b/i.test(row.textContent || '')) { bridgeRow = row; break; }
+  }
+  if (!bridgeRow) return out;
+  const text = bridgeRow.textContent || '';
+
+  /* Attempt 1: TradingView sometimes DOES print the plot title next to its
+   * value (a wider panel, or the legend expanded). Try that first because it
+   * is unambiguous when it is there. */
+  for (const [key, re] of [
+    ['entry', /entry/i],
+    ['sl', /\b(stop|sl)\b/i],
+    ['tp', /\b(target|tp|take\s*profit)\b/i]
+  ]) {
+    if (re.test(text)) {
+      const after = text.split(re)[1] || '';
+      const v = parseNum(after);
+      if (v != null) out[key] = v;
     }
   }
 
-  if (out.side == null && out.entry != null && out.sl != null)
+  /* Attempt 2, and the one that actually fires in the compact legend: no
+   * title words at all, just the indicator's INPUT values (mode, side,
+   * manEntry, manStop, manTarget, atrLen, ...) followed by its PLOTTED
+   * values. Entry/Stop/Target are the script's LAST THREE plots -- the two
+   * after them (Long, R:R) are display.status_line only and never appear
+   * here -- so the last three numbers on the row are entry, stop, target
+   * in that order. This is a heuristic over scraped text, not a guarantee:
+   * ALWAYS shown to the user to check before sending, never sent blind. */
+  if (out.entry == null || out.sl == null || out.tp == null) {
+    const nums = allNumbers(text);
+    if (nums.length >= 3) {
+      const [e, s, t] = nums.slice(-3);
+      if (out.entry == null) out.entry = e;
+      if (out.sl == null) out.sl = s;
+      if (out.tp == null) out.tp = t;
+    }
+  }
+
+  if (/\blong\b/i.test(text)) out.side = 'buy';
+  else if (/\bshort\b/i.test(text)) out.side = 'sell';
+  else if (out.entry != null && out.sl != null)
     out.side = out.sl < out.entry ? 'buy' : 'sell';   // stop below entry = a long
 
   return out;

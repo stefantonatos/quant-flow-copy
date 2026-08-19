@@ -319,6 +319,18 @@ MetaTrader"), and it was the thing that unblocked the design.
   prints plot values in the status line, so the extension can read them off the page. **The
   plot titles Entry/Stop/Target are an interface, not decoration** — renaming them breaks
   the extension's read button.
+- `bridge/extension/content.js`'s `readLevels()` was reading TradingView's legend by matching
+  the WORDS "Entry"/"Stop"/"Target" next to numbers. **Confirmed via a live console screenshot
+  this is wrong**: the compact legend renders the indicator's input values and its plotted
+  values as one unlabeled run of numbers (`Bridge manual short 0.593... 14 0.5 1 0 0000-0900
+  UTC 82  0.593  0.594  0.591 ...`), no title words at all. Fixed by scoping to the row
+  containing "bridge" and taking the LAST THREE numbers on it — Entry/Stop/Target are the
+  script's last three visible plots (Long/RR are `display.status_line`-only and never show
+  here), so position is reliable even though labels are not. Title-word matching is tried
+  first and kept as a fallback in case a wider legend does show labels. **This is still
+  scraping and still a heuristic** — the popup shows whatever it reads for the user to check,
+  never sends it blind, and that discipline should not be relaxed even though the heuristic
+  got better.
 - `bridge/extension/popup.*` — reads those levels, shows the R:R, flags a wrong-side stop
   before you send, and posts the trade.
 
