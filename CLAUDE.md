@@ -5,7 +5,9 @@ ends.** Add what was learned, what changed, what broke. Correct anything here th
 out to be wrong — and say plainly that it was wrong, don't quietly delete it. The user
 should never have to re-explain this project from scratch.
 
-Last updated: 2026-08-16 (bracket backtester, two new strategies, bracket-aware optimizer).
+Last updated: 2026-08-20 (bridge live-tested on Stefan's laptop: risk-based sizing, DOM
+scraping fixed via real diagnostics instead of guessing, and the confirmed platform limit
+that Pine cannot reopen the click-to-place prompt or move an input.price handle from code).
 
 ---
 
@@ -355,6 +357,81 @@ measurements of edge. Both new strategies fire only a handful of trades on it. T
 blocker is unchanged: **no market-data egress from this container**, so Stefan has to
 export the data himself. He now needs **15-minute forex** for `nowick` in addition to the
 MNQ 1-minute for the Lorentzian work.
+
+## Update (2026-08-19/20): bridge taken live on Stefan's own laptop — money-based sizing,
+## broker symbol resolution, and a real limit on what Pine can do
+
+Stefan actually set the bridge up end to end (Chrome extension + MT5 EA + webhook server)
+and ran it dry-run against his live EURNZD chart. Several rounds of real debugging, in
+order:
+
+- **Extension DOM reading was wrong five different ways before it was right.** Guessing at
+  TradingView's legend markup (title-word matching, "last 3 numbers", leaf-node walking)
+  each produced a *plausible-looking* wrong number, not an obvious error. What actually
+  fixed it: a "Copy diagnostics" button that dumps the real DOM around the indicator so the
+  reader could be built against ground truth instead of another guess. It revealed
+  TradingView tags every legend value with `data-test-id-value-title="Entry"` etc. — read
+  that attribute directly, never the concatenated `.textContent`. **Lesson for next time
+  anything scrapes a UI we don't control: get a real DOM/state dump before writing the
+  fourth attempt, don't just guess a fourth time.**
+- **Position sizing is now risk-based ("$100 per trade"), computed in MT5, not the
+  browser.** `bridge/webhook_server.py` accepts `risk` alongside `lots` (requires `sl` when
+  used, capped by `--max-risk`, default 200); `mt5/TradingViewBridge.mq5`'s
+  `LotsFromRisk()` converts using the symbol's real `SYMBOL_TRADE_TICK_SIZE`/
+  `SYMBOL_TRADE_TICK_VALUE`, rounds lots DOWN, and **refuses the trade** (never silently
+  trades the broker minimum) if the rounded size would risk more than asked. `MaxLots` is
+  now just a backstop (5.0) against a malformed price; `MaxRiskMoney` is the real cap.
+- **`ResolveSymbol()` added to the EA** so a TradingView symbol like `EURNZD` matches a
+  broker's differently-suffixed one (`EURNZD.raw`, `EURNZDm`) by exact match first, then
+  prefix match — needed because no two brokers name symbols the same way.
+- **`start_bridge.bat`** — one-click launcher: checks Python is on PATH, checks the MT5
+  queue path exists (the classic silent failure this guards against: the server happily
+  queues into a folder MT5 never reads), opens the chart in Brave, starts MT5, starts the
+  server. `SYMBOLS` defaults to empty so the bridge trades whatever chart Stefan has open,
+  not just EURNZD.
+- **Stale-code confusion cost real debugging time.** Several "still broken" reports were
+  Stefan testing an old unpacked-extension folder or a server/EA that was never restarted
+  after an update. Fixed by putting the version number in the extension's visible name/
+  popup header, and by always calling out explicitly which side (browser / server / EA)
+  needs restarting after a given code change — "the extension changed" and "the server
+  changed" are different instructions.
+
+**Explicit UX correction — do not reintroduce.** `input.price(..., confirm=true)` on the
+three trade-level inputs was briefly changed to `confirm=false` (thinking a settings-dialog
+edit would be more convenient than clicking on the chart). Stefan's answer: *"no bro. i
+want the clicking thing. its good. i just dont want to have to delete and re place the
+indicator to get that function. i dont want to type values into the box. it's not
+happening."* Reverted to `confirm=true`. Click-to-place on the chart is the feature, not a
+rough edge to smooth over.
+
+**That correction led straight into the actual limit of the platform, now confirmed twice
+over — once from Stefan's own Settings-dialog screenshot, once from TradingView's own
+docs/support pages: a Pine script cannot reopen that click-through prompt, and cannot move
+an already-placed `input.price` point from code. The prompt fires exactly once, when the
+indicator is added.** So "give me a button to reset the indicator so I can re-click" has no
+scripted answer — there is no button Pine can draw that does this. The only click-only
+(no typing) way to move a level once placed is: click the indicator's **name** in the chart
+legend to select it (this reveals its draggable handles) → drag each handle to the new
+price. That already requires no typing and no delete/re-add, so it satisfies both of
+Stefan's constraints — it just isn't a dedicated "reset" affordance, because TradingView
+doesn't expose one to scripts. Said this to him plainly rather than shipping a sixth guess.
+
+**This also means the earlier "snap-to-symbol" fix (below) was only a partial fix, and
+that's now stated honestly in the code comment.** `manualEntry`/`manualStop`/`manualTgt`
+falling back to a `close`-anchored value when the stored price doesn't fit the current
+symbol only fixes what gets *published* (the plotted Entry/Stop/Target lines and the
+box the extension reads) — it does **not** move the actual draggable `input.price` handles,
+because Pine cannot write back to its own inputs. On a big cross-symbol jump (EURNZD →
+XAUUSD) the published levels correctly snap to something visible near current price, but
+the drag handles themselves are still sitting at the old price and off-screen. There is no
+further Pine-side fix available for that half of the problem — it is a genuine platform
+limitation, not a bug to keep chasing.
+
+`bridge/test_bridge.py` is now **26 tests**, all still passing (`TestRiskSizing` added:
+risk-without-lots accepted, risk-without-a-stop rejected, risk-above-cap rejected, etc.).
+
+**Still not validated with real money and still shouldn't be** — see the standing warning
+above. Dry-run only; nothing here has traded live.
 
 ## Update: MT5 port added (2026-08-13)
 

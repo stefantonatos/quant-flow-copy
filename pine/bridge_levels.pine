@@ -51,9 +51,20 @@ side      = input.string("long", "Direction", options=["long", "short"], group=g
 // prices straight onto the chart, which is the whole point -- marking a setup
 // by eye, not typing decimals.
 //
-// To re-place them without deleting the indicator, open its settings and use
-// the price picker beside each field (the small crosshair/target icon). That
-// gives the same click-on-chart behaviour on an indicator already loaded.
+// CORRECTION, checked against TradingView's own docs and confirmed by a
+// screenshot of the actual Settings dialog: there is no picker icon there.
+// Pine gives a script no way to reopen that click-through prompt, and no way
+// to move these points from code -- input.price is read-only to the script.
+// The prompt fires exactly once, when the indicator is added.
+//
+// The only click-only (no typing) way to move an already-placed level is:
+// click the indicator's NAME in the chart legend (this selects it and shows
+// its handles) -> drag each handle to the new price. That is the real
+// "reset" -- there isn't a button, this IS the button. It only works while
+// the handles are on screen, which is why the snap-to-symbol fallback below
+// exists: on a wildly different-priced symbol the *published* levels snap to
+// something visible, but the handles themselves are still stuck at the old
+// price and off-screen -- Pine cannot move them, only you dragging can.
 manEntry  = input.price(0.0, "Entry",  group=grpTrade, confirm=true)
 manStop   = input.price(0.0, "Stop",   group=grpTrade, confirm=true)
 manTarget = input.price(0.0, "Target", group=grpTrade, confirm=true)
