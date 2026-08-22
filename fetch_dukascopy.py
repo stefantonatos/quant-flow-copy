@@ -58,6 +58,13 @@ INTERVALS = {
     "1d": "INTERVAL_DAY_1",
 }
 
+# How much wall time to request per call, per interval. Sized so a chunk stays
+# well under whatever row cap the endpoint enforces -- the cap is what silently
+# truncated the first version of this script. Finer bars => shorter windows.
+CHUNK_DAYS = {
+    "1m": 5, "5m": 20, "15m": 60, "30m": 90, "1h": 180, "4h": 365, "1d": 1825,
+}
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
@@ -97,7 +104,7 @@ def main() -> int:
 
     start = datetime.datetime.strptime(args.start, "%Y-%m-%d")
     end = (datetime.datetime.strptime(args.end, "%Y-%m-%d") if args.end
-           else datetime.datetime.utcnow())
+           else datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None))
 
     # Loud, because it is the single most common way to waste an afternoon here:
     # daily bars cannot produce a single vwapfade trade. On a daily bar the whole
@@ -112,22 +119,44 @@ def main() -> int:
     print(f">> {start:%Y-%m-%d} -> {end:%Y-%m-%d}")
     print(">> fetching (this can take a few minutes for multi-year ranges)")
 
-    try:
-        df = dukascopy_python.fetch(
-            getattr(I, inst_name),
-            getattr(dukascopy_python, INTERVALS[args.interval]),
-            dukascopy_python.OFFER_SIDE_BID,
-            start, end,
-        )
-    except Exception as exc:                      # network, proxy, bad symbol
-        print(f"FETCH FAILED: {type(exc).__name__}: {exc}")
-        print("If this says 403 / proxy, you are on a machine without access to "
-              "dukascopy.com -- run it somewhere with normal internet.")
+    # CHUNKING IS NOT OPTIONAL -- it is the whole reason this loop exists.
+    # One fetch() call over a multi-year range comes back SILENTLY TRUNCATED:
+    # asking for 2020->2026 hourly returned 7,304 bars when the true count is
+    # nearer 39,000. It does not raise, it does not warn, it just hands back
+    # the tail of the range and looks like it worked. Requesting in bounded
+    # windows and stitching is what actually gets the full history.
+    span = CHUNK_DAYS.get(args.interval, 365)
+    frames = []
+    cursor = start
+    while cursor < end:
+        stop = min(cursor + datetime.timedelta(days=span), end)
+        try:
+            part = dukascopy_python.fetch(
+                getattr(I, inst_name),
+                getattr(dukascopy_python, INTERVALS[args.interval]),
+                dukascopy_python.OFFER_SIDE_BID,
+                cursor, stop,
+            )
+        except Exception as exc:                  # network, proxy, bad symbol
+            print(f"FETCH FAILED at {cursor:%Y-%m-%d}: {type(exc).__name__}: {exc}")
+            print("If this says 403 / proxy, you are on a machine without access "
+                  "to dukascopy.com -- run it somewhere with normal internet.")
+            return 1
+        got = 0 if part is None else len(part)
+        print(f"   {cursor:%Y-%m-%d} -> {stop:%Y-%m-%d}: {got:>6,} bars")
+        if got:
+            frames.append(part)
+        cursor = stop
+
+    if not frames:
+        print("No rows returned at all. Check the date range and instrument.")
         return 1
 
-    if df is None or len(df) == 0:
-        print("No rows returned. Check the date range and instrument.")
-        return 1
+    import pandas as pd
+    df = pd.concat(frames)
+    # Chunk edges overlap by a bar, and a duplicated bar is a second chance to
+    # trade the same moment -- it would quietly inflate every statistic.
+    df = df[~df.index.duplicated(keep="first")].sort_index()
 
     out = args.out or os.path.join(
         "fixtures", "data",
@@ -151,6 +180,24 @@ def main() -> int:
             ])
 
     print(f">> wrote {len(df):,} bars to {out}")
+    print(f">> covering {df.index[0]} -> {df.index[-1]}")
+
+    # Say out loud whether the result is the size it should be. The first
+    # version of this script reported "wrote 7,304 bars" in a cheerful tone
+    # for what was really 15 months of a 79-month request, and nothing in the
+    # output hinted anything was missing.
+    per_day = {"1m": 1440, "5m": 288, "15m": 96, "30m": 48,
+               "1h": 24, "4h": 6, "1d": 1}[args.interval]
+    # ~5/7 of days are trading days; be generous and only complain below half.
+    expected = (end - start).days * per_day * 5 / 7
+    if expected > 0 and len(df) < 0.5 * expected:
+        print()
+        print(f"!! WARNING: expected very roughly {expected:,.0f} bars for this "
+              f"range, got {len(df):,}.")
+        print("!! The history may not go back as far as you asked, or a chunk "
+              "came back short. Check the covered range printed above before "
+              "trusting any backtest built on this file.")
+
     print()
     print("Now run:")
     print(f'   python run.py "vwap fade" --data {out} --fee 1')
