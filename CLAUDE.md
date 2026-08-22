@@ -7,9 +7,9 @@ should never have to re-explain this project from scratch.
 
 Last updated: 2026-08-22 (FIRST REAL VALIDATION: 15.4 years of real NAS100 hourly data,
 via public GitHub repos + Dukascopy mobile export. vwapfade results and the session-anchor
-caveat that flips their sign are in the "first real validation" section below).
-plus a real session-anchored `vwap_session()` added to engine.py alongside the old
-rolling-window `vwap_rolling()`).
+caveat that flips their sign are in the "first real validation" section below). Also this
+day: the new `vwapfade` strategy and a real session-anchored `vwap_session()` in engine.py
+alongside the old rolling-window `vwap_rolling()`.
 
 ---
 
