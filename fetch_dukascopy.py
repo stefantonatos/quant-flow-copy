@@ -81,22 +81,31 @@ def verify(bars, ref_path: str) -> None:
             if d > worst:
                 worst, worst_at = d, t
 
+    # Bars we have that the reference does not is just as much a defect as
+    # bars we are missing -- that asymmetry is exactly how ~250 closed-hour
+    # padding bars a month slipped through the first time this check ran.
+    lo, hi = min(ref), max(ref)
+    extra = sum(1 for t in ours if lo <= t <= hi and t not in ref)
+    missing = len(set(ref) - set(ours))
+
     print()
     print(f">> VERIFY against {os.path.basename(ref_path)}")
     print(f"   overlapping bars: {len(common):,} of {len(ref):,} in the reference")
-    missing = len(set(ref) - set(ours))
     if missing:
         print(f"   !! {missing:,} reference bars are MISSING from the fetch")
+    if extra:
+        print(f"   !! {extra:,} EXTRA bars inside the reference's own date range "
+              f"(the reference has none there)")
     if worst_at is not None:
-        when = datetime.datetime.utcfromtimestamp(worst_at)
+        when = datetime.datetime.fromtimestamp(worst_at, datetime.timezone.utc)
         print(f"   largest price disagreement: {worst*100:.4f}%  at {when:%Y-%m-%d %H:%M}")
-    if worst < 1e-6 and not missing:
+    if worst < 1e-6 and not missing and not extra:
         print("   PASS -- identical to the hand-downloaded reference.")
-    elif worst < 1e-3:
+    elif worst < 1e-3 and not missing and not extra:
         print("   PASS -- differences are rounding-level.")
     else:
-        print("   !! FAIL -- these are not the same bars. Do NOT backtest this "
-              "file until the cause is understood.")
+        print("   !! Bar sets differ. Do NOT backtest this file until the "
+              "cause is understood.")
 
 
 def main() -> int:
@@ -152,8 +161,8 @@ def main() -> int:
         for b in bars:
             w.writerow([int(b.t), b.o, b.h, b.l, b.c, b.v])
 
-    first = datetime.datetime.utcfromtimestamp(bars[0].t)
-    last = datetime.datetime.utcfromtimestamp(bars[-1].t)
+    first = datetime.datetime.fromtimestamp(bars[0].t, datetime.timezone.utc)
+    last = datetime.datetime.fromtimestamp(bars[-1].t, datetime.timezone.utc)
     print()
     print(f">> wrote {len(bars):,} bars to {out}")
     print(f">> covering {first:%Y-%m-%d %H:%M} -> {last:%Y-%m-%d %H:%M} UTC")
@@ -164,6 +173,9 @@ def main() -> int:
           f"(a 23-hour index CFD should be near 23)")
     if per_day < 12:
         print("   !! That is too sparse for hourly data. Something thinned it.")
+    elif per_day > 26:
+        print("   !! That is too DENSE -- more bars than there are trading "
+              "hours, so closed-hour padding is still in the file.")
 
     # Auto-verify against any reference export sitting in fixtures/data.
     for ref in sorted(glob.glob(os.path.join("fixtures", "data", "USATECH*.csv"))):

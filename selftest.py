@@ -1720,6 +1720,20 @@ class TestDukascopyFeed(unittest.TestCase):
         self.assertEqual(F.decompress(lzma.compress(blob, format=lzma.FORMAT_ALONE)), blob)
         self.assertEqual(F.decompress(b""), b"")
 
+    def test_closed_hour_padding_is_identified(self):
+        """The archive pads shut hours with zero-volume flat records -- 744
+        per 31-day month, i.e. every hour including weekends. Left in, they
+        drag the session VWAP toward a stale price, dilute ATR with
+        zero-range bars, and offer entries at hours nothing could fill."""
+        import dukascopy_feed as F
+        pad = Bar(t=0, o=100.0, h=100.0, l=100.0, c=100.0, v=0.0)
+        real = Bar(t=0, o=100.0, h=101.0, l=99.0, c=100.5, v=5000.0)
+        # A real but very quiet bar still has volume and must be kept.
+        quiet = Bar(t=0, o=100.0, h=100.0, l=100.0, c=100.0, v=12.0)
+        self.assertTrue(F.is_padding(pad))
+        self.assertFalse(F.is_padding(real))
+        self.assertFalse(F.is_padding(quiet))
+
     def test_month_in_url_is_zero_indexed(self):
         """January must be 00. Getting this wrong fetches the wrong month
         and produces data that looks entirely valid."""

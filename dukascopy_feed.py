@@ -153,8 +153,27 @@ def parse_candles(blob: bytes, period_start: datetime.datetime,
     return bars, layout
 
 
+def is_padding(b: Bar) -> bool:
+    """True for a filler bar the archive emits for a CLOSED hour.
+
+    The hourly files are dense over the calendar -- 744 records for a 31-day
+    month, i.e. every hour of every day including weekends. Hours the market
+    was shut are padded with a zero-volume, zero-range record carrying the
+    last price. Dukascopy's own web export omits them, which is how they were
+    caught: a hand-downloaded January 2025 had 495 bars where the archive had
+    744.
+
+    They must be dropped, and not merely for tidiness. Session VWAP is a
+    cumulative average over every bar in the session, so ~250 fake flat bars
+    a month would drag it toward a stale price; ATR would be diluted by
+    zero-range bars; and the strategy would be handed entry opportunities at
+    hours the market was closed and no fill was possible.
+    """
+    return b.v <= 0 and b.o == b.h == b.l == b.c
+
+
 def fetch_hourly(symbol: str, start: datetime.datetime, end: datetime.datetime,
-                 progress: bool = True) -> List[Bar]:
+                 progress: bool = True, drop_padding: bool = True) -> List[Bar]:
     """Hourly bars for [start, end), read month by month from the archive."""
     scale = 10 ** DECIMALS.get(symbol.upper(), DEFAULT_DECIMALS)
     out: List[Bar] = []
@@ -163,15 +182,22 @@ def fetch_hourly(symbol: str, start: datetime.datetime, end: datetime.datetime,
     while cur < end:
         raw = _get(_url_hour_candles(symbol, cur.year, cur.month - 1))
         got = 0
+        dropped = 0
         if raw:
             bars, layout = parse_candles(decompress(raw), cur, scale, layout)
             keep = [b for b in bars
                     if start.timestamp() <= b.t < end.timestamp()]
+            if drop_padding:
+                before = len(keep)
+                keep = [b for b in keep if not is_padding(b)]
+                dropped = before - len(keep)
             out.extend(keep)
             got = len(keep)
         if progress:
-            print(f"   {cur:%Y-%m}: {got:>5,} bars"
-                  + ("" if raw else "   (no file)"))
+            note = "" if raw else "   (no file)"
+            if dropped:
+                note = f"   ({dropped:,} closed-hour padding dropped)"
+            print(f"   {cur:%Y-%m}: {got:>5,} bars{note}")
         cur = (cur.replace(day=28) + datetime.timedelta(days=8)).replace(day=1)
     out.sort(key=lambda b: b.t)
     # Dedupe: a repeated timestamp is a second chance to trade one moment.
