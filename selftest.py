@@ -1648,6 +1648,86 @@ class TestVWAPAnchorHour(unittest.TestCase):
         self.assertAlmostEqual(vwap_session(bars)[1], 200.0, places=6)
 
 
+class TestDukascopyFeed(unittest.TestCase):
+    """Proves the .bi5 decoder offline.
+
+    The network half cannot be tested from this container, so the binary half
+    is pinned against payloads built here to the documented format. If the
+    parser can recover known values from bytes it did not create the layout
+    of, the remaining risk is confined to the URL and the wire.
+    """
+
+    @staticmethod
+    def _payload(records, order):
+        """Build a decompressed candle blob with prices in `order`."""
+        import struct as _s
+        import dukascopy_feed as F
+        out = b""
+        for secs, o, h, l, c, v in records:
+            vals = {"open": o, "high": h, "low": l, "close": c}
+            out += F.CANDLE_STRUCT.pack(secs, *[vals[k] for k in order], v)
+        return out
+
+    def test_decodes_prices_and_timestamps(self):
+        import datetime
+        import dukascopy_feed as F
+        # 21070.242 stored as 21070242 with 3 decimals, like a real index CFD.
+        recs = [(0,     21070242, 21114409, 21038365, 21060720, 526800.0),
+                (3600,  21060820, 21061599, 20915776, 21025198, 885000.0)]
+        blob = self._payload(recs, F.LAYOUTS["ohLc"])
+        bars, layout = F.parse_candles(blob, datetime.datetime(2025, 1, 2), 1000.0)
+        self.assertEqual(len(bars), 2)
+        self.assertAlmostEqual(bars[0].o, 21070.242, places=3)
+        self.assertAlmostEqual(bars[0].h, 21114.409, places=3)
+        self.assertAlmostEqual(bars[0].l, 21038.365, places=3)
+        self.assertAlmostEqual(bars[0].c, 21060.720, places=3)
+        self.assertAlmostEqual(bars[0].v, 526800.0, places=1)
+        # Second bar sits exactly one hour after the file's period start.
+        self.assertAlmostEqual(bars[1].t - bars[0].t, 3600.0, places=6)
+
+    def test_detects_either_field_order(self):
+        """The two documented layouts must both decode to the same bars.
+
+        Assuming one and getting the other silently swaps highs with closes,
+        which corrupts every ATR downstream without raising anything.
+        """
+        import datetime
+        import dukascopy_feed as F
+        recs = [(0, 100000, 120000, 90000, 110000, 5.0)]
+        for name, order in F.LAYOUTS.items():
+            bars, chosen = F.parse_candles(
+                self._payload(recs, order), datetime.datetime(2025, 1, 2), 1000.0)
+            self.assertEqual(chosen, name, f"misidentified layout {name}")
+            self.assertAlmostEqual(bars[0].h, 120.0, places=6)
+            self.assertAlmostEqual(bars[0].l, 90.0, places=6)
+            self.assertAlmostEqual(bars[0].o, 100.0, places=6)
+            self.assertAlmostEqual(bars[0].c, 110.0, places=6)
+
+    def test_refuses_data_that_satisfies_no_layout(self):
+        """Garbage must raise, not decode into plausible-looking prices."""
+        import datetime
+        import dukascopy_feed as F
+        # high below both open and close under either ordering.
+        blob = F.CANDLE_STRUCT.pack(0, 500000, 100000, 900000, 400000, 1.0)
+        with self.assertRaises(ValueError):
+            F.parse_candles(blob, datetime.datetime(2025, 1, 2), 1000.0)
+
+    def test_lzma_roundtrip(self):
+        """Real files are raw LZMA, not .xz -- FORMAT_AUTO must handle it."""
+        import lzma
+        import dukascopy_feed as F
+        blob = b"hello dukascopy" * 10
+        self.assertEqual(F.decompress(lzma.compress(blob, format=lzma.FORMAT_ALONE)), blob)
+        self.assertEqual(F.decompress(b""), b"")
+
+    def test_month_in_url_is_zero_indexed(self):
+        """January must be 00. Getting this wrong fetches the wrong month
+        and produces data that looks entirely valid."""
+        import dukascopy_feed as F
+        self.assertIn("/2025/00/", F._url_hour_candles("USATECHIDXUSD", 2025, 0))
+        self.assertIn("/2025/11/", F._url_hour_candles("USATECHIDXUSD", 2025, 11))
+
+
 class TestVWAPAnchorDST(unittest.TestCase):
     """A local-time anchor must follow the exchange clock across a DST change.
 
