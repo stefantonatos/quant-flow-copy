@@ -34,7 +34,7 @@ import data as D
 
 SRC_REPO = "https://github.com/FutureSharks/financial-data"
 SRC_DIR = os.path.expanduser("~/futuresharks/financial-data")
-GLOB = "pyfinancialdata/data/currencies/oanda/NAS100_USD/*/*.csv"
+GLOB = "pyfinancialdata/data/currencies/oanda/{sym}/*/*.csv"
 DEFAULT_OUT = "fixtures/data_nas100_1h/NAS100_1H_2005-2020.csv"
 
 
@@ -48,11 +48,12 @@ def ensure_source() -> str:
     return SRC_DIR
 
 
-def build(out_path: str = DEFAULT_OUT, seconds: int = 3600) -> str:
+def build(out_path: str = DEFAULT_OUT, seconds: int = 3600,
+          symbol: str = "NAS100_USD") -> str:
     src = ensure_source()
-    paths = sorted(glob.glob(os.path.join(src, GLOB)))
+    paths = sorted(glob.glob(os.path.join(src, GLOB.format(sym=symbol))))
     if not paths:
-        raise SystemExit(f"no NAS100 files under {src}/{GLOB}")
+        raise SystemExit(f"no {symbol} files under {src}")
     print(f">> reading {len(paths)} monthly files")
     bars = D.load_csv_many(paths)
     print(f"   1-minute bars: {len(bars):,}")

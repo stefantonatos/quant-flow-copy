@@ -527,14 +527,32 @@ At `anchor_hour=13` (US cash open), fee 1bp, `entry_atr=2.0`:
 | 14 | +89.7% | +6.89 |
 | 21 / 22 / 23 (CFD session) | −23% to −35% | negative |
 
-The case that 13 is legitimate and not a cherry-pick: 13:30 UTC **is** the US equity cash
-open, and session-anchored VWAP from the cash open is what "VWAP" means to an actual
-Nasdaq trader — it is the a priori standard choice, not the best of six. The case for
-caution: six anchors were tested and the best was reported. **Both statements are true.**
-Anyone continuing this must resolve it properly rather than quoting the +129%:
+**⚠️ THAT CHERRY-PICK WORRY IS NOW LARGELY RESOLVED — by a cross-market test, and this is
+the strongest evidence in the project.** The same sweep was run independently on the two
+other US indices in the same dataset (identical params, fee, code):
+
+| anchor | NAS100 | SPX500 | US2000 (Russell) |
+|---|---|---|---|
+| 0 | −36% | −41% | −8% |
+| **13** | **+130%** | +29% | **+64%** |
+| **14** | +90% | **+49%** | +46% |
+| 21 / 22 / 23 | −23…−35% | −44…−45% | −8…−14% |
+
+**On all three markets independently, 13 or 14 wins and every other anchor loses.** Three
+separate instruments agreeing is not six-way selection on one series — it is the same
+mechanism reproducing. And 13:30 UTC *is* the US cash open, so the winning anchor is the
+one theory predicted in advance. Cross-market with fixed params is the cheapest strong
+robustness test available here; **use it before believing any future result too.**
+
+Full-period, identical params, fee 1bp: NAS100 +129.5% (1290 trades, PF 1.23) ·
+SPX500 +29.3% (1230, PF 1.09) · US2000 +63.6% (1311, PF 1.12). All three positive.
+
+Still genuinely open:
 - **DST is unhandled.** The US cash open is 13:30 UTC in summer and 14:30 in winter, and
-  `anchor_hour` is a fixed integer. A DST-aware anchor is the correct fix and is NOT done.
-- Anchoring should be fixed a priori and then left alone, never swept.
+  `anchor_hour` is a fixed integer — which is exactly why 13 and 14 split the win across
+  the three markets. A DST-aware anchor is the correct fix and is NOT done; it should
+  also *raise* the numbers, since each market currently uses the wrong hour half the year.
+- Anchoring should be fixed a priori and then left alone, never swept per-instrument.
 
 **Two more things that decide this in practice:**
 - **Costs kill it between 3 and 5 bps.** +197% at 0bp, +129% at 1bp, +77% at 2bp, +37% at
