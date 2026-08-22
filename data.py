@@ -214,6 +214,38 @@ def load_csv_many(paths: List[str]) -> List[Bar]:
     return [seen[t] for t in sorted(seen)]
 
 
+def resample(bars: List[Bar], seconds: int) -> List[Bar]:
+    """Aggregate bars up to a coarser timeframe (e.g. 1-minute -> 1-hour).
+
+    Buckets are floor(t / seconds), so a bucket that no bar falls into simply
+    does not exist. That is what makes this safe across weekends and session
+    breaks: it never invents a flat bar to bridge a gap the market was closed
+    for, which would put a fake price into every indicator that reads it.
+
+    OHLC is aggregated the only way that is meaningful -- open from the FIRST
+    bar in the bucket, close from the LAST, high/low as the extremes, volume
+    summed. Bars must already be sorted; load_csv_many() guarantees that.
+    """
+    if seconds <= 0:
+        raise ValueError("seconds must be > 0")
+    out: List[Bar] = []
+    cur_key = None
+    for b in bars:
+        if b.t != b.t:
+            continue
+        key = int(b.t // seconds)
+        if key != cur_key:
+            out.append(Bar(t=key * seconds, o=b.o, h=b.h, l=b.l, c=b.c, v=b.v))
+            cur_key = key
+        else:
+            agg = out[-1]
+            agg.h = max(agg.h, b.h)
+            agg.l = min(agg.l, b.l)
+            agg.c = b.c
+            agg.v += b.v
+    return out
+
+
 def load_path(spec: str) -> List[Bar]:
     """Load a CSV file, a directory of CSVs, or a glob pattern."""
     import glob as _glob

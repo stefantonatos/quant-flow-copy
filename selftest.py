@@ -1608,6 +1608,29 @@ class TestRealExportLoading(unittest.TestCase):
                 _os.unlink(p)
 
 
+class TestResample(unittest.TestCase):
+
+    def test_aggregates_ohlcv_correctly(self):
+        import data as D
+        m = [Bar(t=0,    o=10, h=12, l=9,  c=11, v=1),
+             Bar(t=60,   o=11, h=15, l=8,  c=14, v=2),
+             Bar(t=3600, o=20, h=21, l=19, c=20, v=5)]
+        h = D.resample(m, 3600)
+        self.assertEqual(len(h), 2)
+        self.assertEqual((h[0].o, h[0].h, h[0].l, h[0].c, h[0].v), (10, 15, 8, 14, 3))
+        self.assertEqual(h[0].t, 0)
+        self.assertEqual(h[1].o, 20)
+
+    def test_never_invents_a_bar_across_a_gap(self):
+        """A weekend or session break must produce NO bar, not a flat one.
+        A synthesised bar is a fake price that every indicator downstream
+        would then read as real."""
+        import data as D
+        m = [Bar(t=0, o=10, h=10, l=10, c=10, v=1),
+             Bar(t=3600 * 50, o=20, h=20, l=20, c=20, v=1)]   # ~2 days later
+        self.assertEqual(len(D.resample(m, 3600)), 2)
+
+
 class TestVWAPAnchorHour(unittest.TestCase):
 
     def test_anchor_hour_groups_an_overnight_session(self):

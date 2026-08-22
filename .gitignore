@@ -17,3 +17,4 @@ sample_data.csv
 Thumbs.db
 .idea/
 .vscode/
+fixtures/data_nas100_1h/
