@@ -28,6 +28,10 @@ PARAM_GRIDS: Dict[str, Dict[str, list]] = {
     "macd": {"fast": [8, 12, 16], "slow": [21, 26, 35], "signal": [9]},
     "stoch": {"n": [9, 14, 21], "oversold": [15, 20, 25], "overbought": [75, 80, 85]},
     "vwap": {"n": [10, 20, 50]},
+    # anchor_hour/anchor_tz are deliberately NOT in this grid. The session
+    # anchor is a fact about the exchange, not a parameter to fit -- and the
+    # confidence intervals in CLAUDE.md show the returns cannot tell the
+    # anchors apart anyway, so sweeping it would be fitting noise.
     "vwapfade": {"entry_atr": [1.0, 1.5, 2.0, 2.5, 3.0], "atr_n": [10, 14, 20]},
     "supertrend": {"n": [7, 10, 14], "mult": [2.0, 3.0, 4.0]},
     "roc": {"n": [5, 10, 20]},

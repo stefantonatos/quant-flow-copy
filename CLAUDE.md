@@ -539,20 +539,53 @@ other US indices in the same dataset (identical params, fee, code):
 | 21 / 22 / 23 | −23…−35% | −44…−45% | −8…−14% |
 
 **On all three markets independently, 13 or 14 wins and every other anchor loses.** Three
-separate instruments agreeing is not six-way selection on one series — it is the same
-mechanism reproducing. And 13:30 UTC *is* the US cash open, so the winning anchor is the
-one theory predicted in advance. Cross-market with fixed params is the cheapest strong
-robustness test available here; **use it before believing any future result too.**
+separate instruments agreeing on the *shape* is not six-way selection on one series, and
+13:30 UTC *is* the US cash open, so the winning region is the one theory predicted in
+advance. Cross-market with fixed params is the cheapest strong robustness test available
+here; **use it before believing any future result too.**
 
-Full-period, identical params, fee 1bp: NAS100 +129.5% (1290 trades, PF 1.23) ·
-SPX500 +29.3% (1230, PF 1.09) · US2000 +63.6% (1311, PF 1.12). All three positive.
+### ⚠️ CORRECTION to how that cross-market result was first reported
 
-Still genuinely open:
-- **DST is unhandled.** The US cash open is 13:30 UTC in summer and 14:30 in winter, and
-  `anchor_hour` is a fixed integer — which is exactly why 13 and 14 split the win across
-  the three markets. A DST-aware anchor is the correct fix and is NOT done; it should
-  also *raise* the numbers, since each market currently uses the wrong hour half the year.
-- Anchoring should be fixed a priori and then left alone, never swept per-instrument.
+It was written up (and told to Stefan) as "all three markets profitable — three
+independent confirmations." **That overstated it.** Profitable, yes; *statistically
+distinguishable from zero*, no. Expectancy per trade with a 95% CI, at the DST-correct
+anchor, fee 1bp:
+
+| instrument | expectancy | 95% CI | excludes zero? |
+|---|---|---|---|
+| NAS100 | **+10.52** | +2.07 … +18.97 | **yes — just barely** |
+| SPX500 | +2.13 | −2.63 … +6.89 | **no** |
+| US2000 | +5.81 | −1.16 … +12.78 | **no** |
+
+Only NAS100 clears the bar, and its lower bound is +2.07 on a +10.52 estimate — thin.
+Against that, several anchors and three instruments were examined, so even that marginal
+significance is optimistic once multiple comparisons are accounted for. **The
+cross-market agreement is real but it is agreement on direction, not three independent
+proofs of profit.** Do not quote it as the latter.
+
+**The anchor choice is itself inside the noise.** Same table, comparing anchors on one
+instrument: NAS100 gives +10.04 (fixed 13), +6.89 (fixed 14), +10.52 (09:00 NY) with
+standard errors around ±4. Those intervals overlap almost completely. So the ranking
+between anchors cannot be read off the returns at all — including SPX500, where fixed 14
+posts the highest headline (+48.8%) despite being the wrong anchor for half of every year.
+
+### DST-aware anchoring — DONE, and adopted for correctness, not for the numbers
+
+`vwap_session()` now takes `anchor_tz`. Pass `anchor_hour=9, anchor_tz="America/New_York"`
+and the reset follows the exchange clock: 13:00 UTC in summer, 14:00 in winter. `zoneinfo`
+is stdlib and carries the historic rules, so the 2007 change to the US DST dates is
+handled — which matters, since this data starts in 2005. Locked by
+`TestVWAPAnchorDST`, which asserts the summer and winter resets land on different UTC
+hours and that a fixed UTC anchor gets one of the two wrong.
+
+**Effect on results: NAS100 +129.5% -> +134.8%, US2000 +63.6% -> +75.8%, SPX500
++29.3% -> +26.2%.** Two up, one down, and per the CIs above **all of it is noise**. The
+reason to keep it is that a fixed UTC hour is provably wrong for half of each year and
+the local-time anchor is what the strategy always claimed to do. Adopt correct code; do
+not claim it as an improvement in edge.
+
+Still open: anchoring should be fixed a priori and then left alone, never swept
+per-instrument.
 
 **Two more things that decide this in practice:**
 - **Costs kill it between 3 and 5 bps.** +197% at 0bp, +129% at 1bp, +77% at 2bp, +37% at

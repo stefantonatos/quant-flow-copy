@@ -201,11 +201,12 @@ def vwap_rolling(bars: List[Bar], n: int = 20) -> List[float]:
     return out
 
 
-def vwap_session(bars: List[Bar], anchor_hour: int = 0) -> List[float]:
+def vwap_session(bars: List[Bar], anchor_hour: int = 0,
+                 anchor_tz: Optional[str] = None) -> List[float]:
     """Session-anchored VWAP: cumulative typical-price*volume / cumulative
     volume, reset at the start of every new session.
 
-    `anchor_hour` is the UTC hour the trading day BEGINS. The default 0
+    `anchor_hour` is the hour the trading day BEGINS. The default 0
     (midnight UTC) is right for forex. It is wrong for index CFDs: real
     USATECH/NAS100 hourly data runs 23:00 -> 21:00 UTC, so a midnight reset
     fires an hour INTO the session, splitting it in two and anchoring the
@@ -213,6 +214,19 @@ def vwap_session(bars: List[Bar], anchor_hour: int = 0) -> List[float]:
     wrong doesn't error -- it just quietly computes a VWAP that disagrees
     with the one plotted on the chart, which is the whole failure mode
     this function was written to avoid.
+
+    `anchor_tz` (e.g. "America/New_York") makes `anchor_hour` a LOCAL
+    exchange hour instead of a UTC one, which is the only correct way to
+    anchor an equity index. The US cash open is 09:30 New York, and that is
+    13:30 UTC in summer but 14:30 UTC in winter -- so a fixed UTC integer is
+    guaranteed to be an hour wrong for roughly half of every year. That is
+    not hypothetical: sweeping fixed UTC anchors over 15 years of NAS100,
+    SPX500 and US2000 split the win between 13 and 14 across the three, which
+    is exactly the fingerprint of a DST boundary being straddled.
+
+    Pass anchor_hour=9, anchor_tz="America/New_York" for US equity indices.
+    zoneinfo carries the historic rules, so the 2007 change to the US DST
+    dates is handled for free -- and it matters, since data here starts 2005.
 
     This is what TradingView's built-in `ta.vwap()` computes by default
     (anchored to the session), and it is a different number from
@@ -228,6 +242,11 @@ def vwap_session(bars: List[Bar], anchor_hour: int = 0) -> List[float]:
     typical-price average rather than raising or returning nonsense.
     """
     import datetime
+    tz = None
+    if anchor_tz is not None:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(anchor_tz)
+
     out = [float("nan")] * len(bars)
     cum_pv = 0.0
     cum_v = 0.0
@@ -235,7 +254,14 @@ def vwap_session(bars: List[Bar], anchor_hour: int = 0) -> List[float]:
     for i, b in enumerate(bars):
         # Shifting back by anchor_hour makes every bar of one trading day
         # share a calendar date, so the reset lands on the real session open.
-        day = datetime.datetime.utcfromtimestamp(b.t - anchor_hour * 3600).date()
+        if tz is None:
+            day = datetime.datetime.utcfromtimestamp(b.t - anchor_hour * 3600).date()
+        else:
+            # Convert to exchange-local wall time FIRST, then shift. Doing it
+            # in this order is what makes the reset follow the local clock
+            # across a DST change instead of drifting an hour.
+            local = datetime.datetime.fromtimestamp(b.t, tz)
+            day = (local - datetime.timedelta(hours=anchor_hour)).date()
         if day != last_day:
             cum_pv = 0.0
             cum_v = 0.0

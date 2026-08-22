@@ -1648,6 +1648,47 @@ class TestVWAPAnchorHour(unittest.TestCase):
         self.assertAlmostEqual(vwap_session(bars)[1], 200.0, places=6)
 
 
+class TestVWAPAnchorDST(unittest.TestCase):
+    """A local-time anchor must follow the exchange clock across a DST change.
+
+    The US cash open is 09:30 New York all year, but that is 13:30 UTC in
+    summer and 14:30 UTC in winter. A fixed UTC anchor is therefore an hour
+    wrong for half the year, every year.
+    """
+
+    @staticmethod
+    def _epoch(iso):
+        import datetime
+        return datetime.datetime.fromisoformat(iso).replace(
+            tzinfo=datetime.timezone.utc).timestamp()
+
+    def test_reset_follows_new_york_across_the_dst_boundary(self):
+        # Summer: 09:00 NY == 13:00 UTC. The 13:00 bar must start a session
+        # (reset), so its VWAP is its own typical price, not blended with 12:00.
+        summer = [Bar(t=self._epoch("2025-07-15T12:00"), o=100, h=100, l=100, c=100, v=1),
+                  Bar(t=self._epoch("2025-07-15T13:00"), o=200, h=200, l=200, c=200, v=1)]
+        v = vwap_session(summer, anchor_hour=9, anchor_tz="America/New_York")
+        self.assertAlmostEqual(v[1], 200.0, places=6)
+
+        # Winter: 09:00 NY == 14:00 UTC. Now the 13:00 bar is NOT the open --
+        # it belongs to the prior session -- and 14:00 is the reset.
+        winter = [Bar(t=self._epoch("2025-01-15T13:00"), o=100, h=100, l=100, c=100, v=1),
+                  Bar(t=self._epoch("2025-01-15T14:00"), o=200, h=200, l=200, c=200, v=1)]
+        w = vwap_session(winter, anchor_hour=9, anchor_tz="America/New_York")
+        self.assertAlmostEqual(w[1], 200.0, places=6)
+
+        # And the fixed-UTC anchor gets exactly one of those two wrong, which
+        # is the bug this parameter exists to fix.
+        fixed = vwap_session(winter, anchor_hour=13)
+        self.assertAlmostEqual(fixed[1], 150.0, places=6)
+
+    def test_utc_behaviour_is_unchanged_when_no_tz_is_given(self):
+        bars = [Bar(t=self._epoch("2025-07-15T12:00"), o=100, h=100, l=100, c=100, v=1),
+                Bar(t=self._epoch("2025-07-15T13:00"), o=200, h=200, l=200, c=200, v=1)]
+        self.assertAlmostEqual(vwap_session(bars, anchor_hour=13)[1], 200.0, places=6)
+        self.assertAlmostEqual(vwap_session(bars)[1], 150.0, places=6)
+
+
 class TestVWAPATRFade(unittest.TestCase):
     """Long only: enter 2x ATR below session VWAP, exit at VWAP."""
 
