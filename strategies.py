@@ -278,7 +278,7 @@ class VWAPATRFade(Strategy):
 
     def prepare(self):
         p = self.params
-        self.vwap = vwap_session(self.bars)
+        self.vwap = vwap_session(self.bars, p.get("anchor_hour", 0))
         self.atrv = atr(self.bars, p.get("atr_n", 14))
         self.entry_mult = p.get("entry_atr", 2.0)
         self.holding = False

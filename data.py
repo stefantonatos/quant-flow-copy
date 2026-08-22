@@ -162,10 +162,19 @@ def load_csv(path: str) -> List[Bar]:
                         if k and k.strip().lower() == n.strip().lower():
                             return parse(row[k])
                 return float("nan")
+            ts = g("t", "time", "date", "timestamp", "datetime",
+                   "gmt time", "Gmt time", "Date", "Time", "Datetime",
+                   "Local time", "local time", parse=_to_epoch)
+            if ts != ts and cols:
+                # No recognised name matched. Dukascopy's export names the
+                # time column after the TIMEZONE -- "Etc/UTC", "Europe/Zurich"
+                # -- so there is no fixed name to look for and the list above
+                # can never be made complete. The first column is the time
+                # column in every OHLC export any of these venues produce, so
+                # fall back to position when the name is unrecognised.
+                ts = _to_epoch(row[next(iter(cols))])
             bars.append(Bar(
-                t=g("t", "time", "date", "timestamp", "datetime",
-                    "gmt time", "Gmt time", "Date", "Time", "Datetime",
-                    "Local time", "local time", parse=_to_epoch),
+                t=ts,
                 o=g("o", "open"),
                 h=g("h", "high"),
                 l=g("l", "low"),
@@ -181,6 +190,42 @@ def load_csv(path: str) -> List[Bar]:
               f"Session strategies (asiasweep, po3, orb) need real UTC times and "
               f"will silently produce nothing. Check the time column's format.")
     return bars
+
+
+def load_csv_many(paths: List[str]) -> List[Bar]:
+    """Load and stitch several CSV exports into one continuous series.
+
+    Dukascopy's web export caps a 1-hour download at roughly one month, so a
+    year of data arrives as ~12 separate files. This concatenates them,
+    DEDUPES BY TIMESTAMP and sorts chronologically, so overlapping or
+    out-of-order downloads are safe -- the ranges do not have to be picked
+    carefully, and re-sending a file you already sent changes nothing.
+
+    Deduping matters more than it looks: a duplicated bar is not a rounding
+    error, it is a second chance for a strategy to trade the same moment,
+    which quietly inflates the trade count and every statistic derived from
+    it.
+    """
+    seen = {}
+    for p in paths:
+        for b in load_csv(p):
+            if b.t == b.t:            # drop unparsable rows, already warned
+                seen[b.t] = b
+    return [seen[t] for t in sorted(seen)]
+
+
+def load_path(spec: str) -> List[Bar]:
+    """Load a CSV file, a directory of CSVs, or a glob pattern."""
+    import glob as _glob
+    if os.path.isdir(spec):
+        paths = sorted(_glob.glob(os.path.join(spec, "*.csv")))
+    elif any(ch in spec for ch in "*?["):
+        paths = sorted(_glob.glob(spec))
+    else:
+        paths = [spec]
+    if not paths:
+        raise FileNotFoundError(f"no CSV files matched: {spec}")
+    return load_csv_many(paths) if len(paths) > 1 else load_csv(paths[0])
 
 
 def from_yahoo(symbol: str, interval: str = "1d", range_: str = "1y") -> List[Bar]:

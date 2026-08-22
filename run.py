@@ -10,7 +10,9 @@ Usage:
   python run.py "macd" --data sample --walkforward 4 --montecarlo 1000
 
 Flags:
-  --data sample|yahoo|stooq|binance
+  --data sample|yahoo|stooq|binance|<csv file, directory, or glob>
+                      A directory or glob of CSVs is stitched into one series
+                      (deduped by timestamp), e.g. --data fixtures/data
   --symbol SYM        (for yahoo/stooq/binance)
   --range R           yahoo history range: 1mo/6mo/1y/5y/max (default 1y)
   --interval I        bar size: yahoo 1d/1wk/1mo, binance 1m/5m/15m/1h/1d... (default 1d)
@@ -262,6 +264,11 @@ def main(argv):
         bars = D.from_stooq(symbol or "aapl.us")
     elif data_src == "binance":
         bars = D.from_binance(symbol or "BTCUSDT", interval=interval, limit=limit)
+    elif os.path.exists(data_src) or any(ch in data_src for ch in "*?["):
+        # A path, a directory, or a glob -- real exported data. Several files
+        # are stitched, deduped and sorted, since a venue's download cap means
+        # a year of intraday bars arrives as a dozen separate files.
+        bars = D.load_path(data_src)
     else:
         print(f"Unknown source '{data_src}', falling back to sample.")
         bars = D.load_csv(D.sample_csv())

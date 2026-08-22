@@ -201,9 +201,18 @@ def vwap_rolling(bars: List[Bar], n: int = 20) -> List[float]:
     return out
 
 
-def vwap_session(bars: List[Bar]) -> List[float]:
+def vwap_session(bars: List[Bar], anchor_hour: int = 0) -> List[float]:
     """Session-anchored VWAP: cumulative typical-price*volume / cumulative
-    volume, reset at every new UTC calendar day.
+    volume, reset at the start of every new session.
+
+    `anchor_hour` is the UTC hour the trading day BEGINS. The default 0
+    (midnight UTC) is right for forex. It is wrong for index CFDs: real
+    USATECH/NAS100 hourly data runs 23:00 -> 21:00 UTC, so a midnight reset
+    fires an hour INTO the session, splitting it in two and anchoring the
+    VWAP to the wrong price. Pass anchor_hour=23 for those. Getting this
+    wrong doesn't error -- it just quietly computes a VWAP that disagrees
+    with the one plotted on the chart, which is the whole failure mode
+    this function was written to avoid.
 
     This is what TradingView's built-in `ta.vwap()` computes by default
     (anchored to the session), and it is a different number from
@@ -224,7 +233,9 @@ def vwap_session(bars: List[Bar]) -> List[float]:
     cum_v = 0.0
     last_day = None
     for i, b in enumerate(bars):
-        day = datetime.datetime.utcfromtimestamp(b.t).date()
+        # Shifting back by anchor_hour makes every bar of one trading day
+        # share a calendar date, so the reset lands on the real session open.
+        day = datetime.datetime.utcfromtimestamp(b.t - anchor_hour * 3600).date()
         if day != last_day:
             cum_pv = 0.0
             cum_v = 0.0

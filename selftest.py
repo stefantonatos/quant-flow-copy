@@ -1562,6 +1562,69 @@ class TestAsiaSweepIFVG(unittest.TestCase):
             self.assertAlmostEqual(t.stop0, s.stops[t.entry_i], places=9)
 
 
+class TestRealExportLoading(unittest.TestCase):
+    """Regression tests from a real Dukascopy mobile export."""
+
+    def test_timezone_named_time_column_parses(self):
+        """Dukascopy names the time column after the TIMEZONE ("Etc/UTC"), so
+        no fixed list of column names can ever match it. Falling back to the
+        first column is what makes a real export loadable at all -- without
+        it every row's timestamp was NaN."""
+        import tempfile, os as _os, data as D
+        csv_text = ("Etc/UTC,Open,High,Low,Close,Volume\n"
+                    "2025-01-02T00:00:00+00:00,1,2,0.5,1.5,100\n")
+        fd, p = tempfile.mkstemp(suffix=".csv")
+        with _os.fdopen(fd, "w") as f:
+            f.write(csv_text)
+        try:
+            bars = D.load_csv(p)
+            self.assertEqual(len(bars), 1)
+            self.assertEqual(bars[0].t, bars[0].t, "timestamp must not be NaN")
+        finally:
+            _os.unlink(p)
+
+    def test_stitching_dedupes_overlapping_files(self):
+        """Overlapping monthly downloads must not double-count a bar: a
+        duplicate is a second chance to trade the same moment."""
+        import tempfile, os as _os, data as D
+        rows_a = ("Etc/UTC,Open,High,Low,Close,Volume\n"
+                  "2025-01-02T00:00:00+00:00,1,2,0.5,1.5,100\n"
+                  "2025-01-02T01:00:00+00:00,1,2,0.5,1.5,100\n")
+        rows_b = ("Etc/UTC,Open,High,Low,Close,Volume\n"
+                  "2025-01-02T01:00:00+00:00,1,2,0.5,1.5,100\n"   # overlap
+                  "2025-01-02T02:00:00+00:00,1,2,0.5,1.5,100\n")
+        paths = []
+        for text in (rows_b, rows_a):        # deliberately out of order
+            fd, p = tempfile.mkstemp(suffix=".csv")
+            with _os.fdopen(fd, "w") as f:
+                f.write(text)
+            paths.append(p)
+        try:
+            bars = D.load_csv_many(paths)
+            self.assertEqual(len(bars), 3)
+            self.assertEqual([b.t for b in bars], sorted(b.t for b in bars))
+        finally:
+            for p in paths:
+                _os.unlink(p)
+
+
+class TestVWAPAnchorHour(unittest.TestCase):
+
+    def test_anchor_hour_groups_an_overnight_session(self):
+        """Index CFDs run 23:00 -> 21:00 UTC. With the default midnight
+        reset the 23:00 bar lands in the PREVIOUS session; anchor_hour=23
+        must put it at the start of the new one, where the chart puts it."""
+        bars = [
+            Bar(t=1735772400, o=100, h=100, l=100, c=100, v=1),   # Jan 1 23:00
+            Bar(t=1735776000, o=200, h=200, l=200, c=200, v=1),   # Jan 2 00:00
+        ]
+        anchored = vwap_session(bars, anchor_hour=23)
+        # Both bars are one session, so bar 2's VWAP averages them.
+        self.assertAlmostEqual(anchored[1], 150.0, places=6)
+        # With the midnight default, bar 2 starts a fresh session.
+        self.assertAlmostEqual(vwap_session(bars)[1], 200.0, places=6)
+
+
 class TestVWAPATRFade(unittest.TestCase):
     """Long only: enter 2x ATR below session VWAP, exit at VWAP."""
 
