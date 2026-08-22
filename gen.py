@@ -124,6 +124,20 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
         expl = f"Matched STOCHASTIC REVERSION (period {n}). Long when %K < 20, exits when %K > 80."
         return "stoch", params, expl
 
+    # ---- VWAP + ATR band fade (long only) -- before the generic vwap match ----
+    if "vwap" in t and ("atr" in t or "below" in t):
+        mult = 2.0
+        m = re.search(r"(\d+\.?\d*)\s*atr", t)
+        if m:
+            mult = float(m.group(1))
+        params = {"entry_atr": mult, "atr_n": 14}
+        expl = (f"Matched VWAP ATR FADE (long only, {mult}x ATR). Enter long when "
+                f"close is {mult} ATR below the session VWAP, exit at VWAP. No "
+                f"shorts, no stop-loss -- as specified. Needs intraday bars; on "
+                f"daily sample data each bar is its own session so it will "
+                f"trade little to nothing.")
+        return "vwapfade", params, expl
+
     # ---- VWAP ----
     if "vwap" in t:
         n = _first_int(t, 20)

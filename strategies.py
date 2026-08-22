@@ -16,7 +16,7 @@ import math
 
 from engine import (
     Strategy, Bar, sma, ema, rsi, atr, bollinger, highest, lowest,
-    macd, stochastic, vwap_rolling, supertrend, roc,
+    macd, stochastic, vwap_rolling, vwap_session, supertrend, roc,
     wavetrend, cci, adx, normalize01, pivots, confirmed_pivots, fvgs,
 )
 from typing import List
@@ -264,6 +264,56 @@ class VWAPReversion(Strategy):
                 f"vwap = math.sum(src*volume, {n}) / math.sum(volume, {n})\n"
                 f"longCond = close > vwap\n"
                 f"plot(vwap, color=color.blue)\n")
+
+
+class VWAPATRFade(Strategy):
+    name = "VWAP ATR Fade"
+    description = ("Long only. Enter when close is entry_atr x ATR below the "
+                   "session VWAP, exit when close reaches VWAP. No shorts, "
+                   "no stop-loss -- exactly as specified; see the honest note "
+                   "on that in CLAUDE.md before trading it. Needs intraday "
+                   "bars: on daily data each session is one bar, so VWAP "
+                   "collapses to that bar's own typical price and the entry "
+                   "condition almost never fires.")
+
+    def prepare(self):
+        p = self.params
+        self.vwap = vwap_session(self.bars)
+        self.atrv = atr(self.bars, p.get("atr_n", 14))
+        self.entry_mult = p.get("entry_atr", 2.0)
+        self.holding = False
+
+    def decide(self, i):
+        v, a = self.vwap[i], self.atrv[i]
+        if v != v or a != a:  # nan during warmup
+            return "LONG" if self.holding else "FLAT"
+        c = self.closes[i]
+        if not self.holding and c <= v - self.entry_mult * a:
+            self.holding = True
+        elif self.holding and c >= v:
+            self.holding = False
+        return "LONG" if self.holding else "FLAT"
+
+    def to_pine(self):
+        p = self.params
+        mult = p.get("entry_atr", 2.0)
+        atr_n = p.get("atr_n", 14)
+        return (f"//@version=6\n"
+                f"indicator(\"VWAP ATR Fade (free)\", overlay=true)\n"
+                f"v = ta.vwap(hlc3)\n"
+                f"a = ta.atr({atr_n})\n"
+                f"longCond = close <= v - {mult} * a\n"
+                f"exitCond = close >= v\n"
+                f"var bool holding = false\n"
+                f"if longCond\n"
+                f"    holding := true\n"
+                f"if exitCond\n"
+                f"    holding := false\n"
+                f"plot(v, color=color.blue, title=\"VWAP\")\n"
+                f"plotshape(longCond and not holding[1], style=shape.triangleup, "
+                f"color=color.green, location=location.belowbar, size=size.tiny)\n"
+                f"plotshape(exitCond and holding[1], style=shape.circledot, "
+                f"color=color.red, size=size.tiny)\n")
 
 
 class SupertrendFollow(Strategy):
@@ -1454,6 +1504,7 @@ REGISTRY = {
     "macd": MACDCrossover,
     "stoch": StochasticReversion,
     "vwap": VWAPReversion,
+    "vwapfade": VWAPATRFade,
     "supertrend": SupertrendFollow,
     "roc": MomentumROC,
     "bollrsi": BollingerRSI,

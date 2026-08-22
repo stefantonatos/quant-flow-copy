@@ -17,7 +17,8 @@ import math
 import unittest
 from typing import List
 
-from engine import Bar, Strategy, Trade, Report, run, bars_per_year, sma, ema, rsi, atr
+from engine import (Bar, Strategy, Trade, Report, run, bars_per_year, sma, ema, rsi, atr,
+                   vwap_session)
 
 
 def mkbars(closes, t0=0, dt=86400, spread=0.0) -> List[Bar]:
@@ -276,6 +277,31 @@ class TestIndicators(unittest.TestCase):
             prev = x * k + prev * (1 - k)
         self.assertNotAlmostEqual(ours[-1], prev, places=9)
         self.assertAlmostEqual(ours[-1], prev, places=2)  # converges, never equal
+
+
+class TestVWAPSession(unittest.TestCase):
+
+    def test_resets_at_each_new_utc_day(self):
+        # Two 1-hour bars in day 1, then one in day 2. If day 2 didn't reset,
+        # its VWAP would still carry day 1's volume in the average.
+        bars = [
+            Bar(t=0,      o=100, h=101, l=99,  c=100, v=10),
+            Bar(t=3600,   o=100, h=101, l=99,  c=100, v=10),
+            Bar(t=86400,  o=200, h=201, l=199, c=200, v=10),
+        ]
+        v = vwap_session(bars)
+        self.assertAlmostEqual(v[2], 200.0, places=6)
+
+    def test_matches_typical_price_on_first_bar_of_a_session(self):
+        bars = [Bar(t=0, o=10, h=12, l=8, c=11, v=5)]
+        v = vwap_session(bars)
+        self.assertAlmostEqual(v[0], (12 + 8 + 11) / 3.0, places=6)
+
+    def test_zero_volume_degrades_to_equal_weighting_not_nan(self):
+        bars = [Bar(t=0, o=10, h=10, l=10, c=10, v=0),
+                Bar(t=60, o=20, h=20, l=20, c=20, v=0)]
+        v = vwap_session(bars)
+        self.assertAlmostEqual(v[1], 15.0, places=6)
 
 
 # ---------------------------------------------------------------------------
@@ -1534,6 +1560,47 @@ class TestAsiaSweepIFVG(unittest.TestCase):
         for t in rep.trades:
             self.assertAlmostEqual(t.entry_px, s.entries[t.entry_i], places=9)
             self.assertAlmostEqual(t.stop0, s.stops[t.entry_i], places=9)
+
+
+class TestVWAPATRFade(unittest.TestCase):
+    """Long only: enter 2x ATR below session VWAP, exit at VWAP."""
+
+    def _bars(self):
+        from strategies import VWAPATRFade
+        # Flat around 100 (builds VWAP ~= 100 and a nonzero ATR), then a sharp
+        # drop that clears the entry band, then a recovery back up through it.
+        closes = [100.0] * 20 + [100 - 0.4 * k for k in range(1, 11)] + [96 + 0.5 * k for k in range(1, 12)]
+        bars = [Bar(t=i * 3600, o=c, h=c + 0.3, l=c - 0.3, c=c, v=1.0)
+               for i, c in enumerate(closes)]
+        return bars, VWAPATRFade
+
+    def test_never_goes_short(self):
+        bars, cls = self._bars()
+        s = cls(bars=bars, params={"entry_atr": 2.0, "atr_n": 5})
+        for i in range(len(bars)):
+            self.assertIn(s.decide(i), ("LONG", "FLAT"))
+
+    def test_enters_once_the_drop_clears_the_atr_band_and_exits_back_at_vwap(self):
+        bars, cls = self._bars()
+        s = cls(bars=bars, params={"entry_atr": 2.0, "atr_n": 5})
+        postures = [s.decide(i) for i in range(len(bars))]
+        self.assertIn("LONG", postures)
+        first_long = postures.index("LONG")
+        # Must not fire before price actually reached the band.
+        v, a = s.vwap[first_long], s.atrv[first_long]
+        self.assertLessEqual(bars[first_long].c, v - 2.0 * a + 1e-9)
+        # And once it flips FLAT again after that, close must be back >= vwap.
+        later_flat = next((i for i in range(first_long + 1, len(bars))
+                          if postures[i] == "FLAT"), None)
+        self.assertIsNotNone(later_flat)
+        self.assertGreaterEqual(bars[later_flat].c, s.vwap[later_flat] - 1e-9)
+
+    def test_no_drop_means_no_trade(self):
+        bars = [Bar(t=i * 3600, o=100, h=100.3, l=99.7, c=100, v=1.0) for i in range(30)]
+        from strategies import VWAPATRFade
+        s = VWAPATRFade(bars=bars, params={"entry_atr": 2.0, "atr_n": 5})
+        postures = [s.decide(i) for i in range(len(bars))]
+        self.assertTrue(all(p == "FLAT" for p in postures))
 
 
 if __name__ == "__main__":

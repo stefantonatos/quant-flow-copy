@@ -201,6 +201,42 @@ def vwap_rolling(bars: List[Bar], n: int = 20) -> List[float]:
     return out
 
 
+def vwap_session(bars: List[Bar]) -> List[float]:
+    """Session-anchored VWAP: cumulative typical-price*volume / cumulative
+    volume, reset at every new UTC calendar day.
+
+    This is what TradingView's built-in `ta.vwap()` computes by default
+    (anchored to the session), and it is a different number from
+    `vwap_rolling()` above, which is a fixed N-bar window. The distinction
+    matters here specifically: a strategy defined relative to "VWAP" needs
+    to agree with what's actually plotted on the chart it's compared against,
+    not a same-named but differently-defined approximation -- the exact kind
+    of silent divergence this project has been burned by before (see
+    normalize_windowed() in CLAUDE.md).
+
+    Bars with no real volume (v == 0, common on forex feeds) fall back to
+    weighting every bar equally, which degrades gracefully to a plain
+    typical-price average rather than raising or returning nonsense.
+    """
+    import datetime
+    out = [float("nan")] * len(bars)
+    cum_pv = 0.0
+    cum_v = 0.0
+    last_day = None
+    for i, b in enumerate(bars):
+        day = datetime.datetime.utcfromtimestamp(b.t).date()
+        if day != last_day:
+            cum_pv = 0.0
+            cum_v = 0.0
+            last_day = day
+        tp = (b.h + b.l + b.c) / 3.0
+        v = b.v if b.v > 0 else 1.0
+        cum_pv += tp * v
+        cum_v += v
+        out[i] = cum_pv / cum_v if cum_v > 0 else tp
+    return out
+
+
 def supertrend(bars: List[Bar], n: int = 10, mult: float = 3.0):
     """Returns (line, direction) where direction[i] is 1 (up/long bias) or
     -1 (down/short bias)."""

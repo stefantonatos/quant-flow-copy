@@ -5,9 +5,9 @@ ends.** Add what was learned, what changed, what broke. Correct anything here th
 out to be wrong — and say plainly that it was wrong, don't quietly delete it. The user
 should never have to re-explain this project from scratch.
 
-Last updated: 2026-08-20 (bridge live-tested on Stefan's laptop: risk-based sizing, DOM
-scraping fixed via real diagnostics instead of guessing, and the confirmed platform limit
-that Pine cannot reopen the click-to-place prompt or move an input.price handle from code).
+Last updated: 2026-08-22 (new strategy: `vwapfade`, long-only VWAP-ATR mean reversion,
+plus a real session-anchored `vwap_session()` added to engine.py alongside the old
+rolling-window `vwap_rolling()`).
 
 ---
 
@@ -432,6 +432,50 @@ risk-without-lots accepted, risk-without-a-stop rejected, risk-above-cap rejecte
 
 **Still not validated with real money and still shouldn't be** — see the standing warning
 above. Dry-run only; nothing here has traded live.
+
+## Update (2026-08-22): new strategy `vwapfade` — long-only VWAP-ATR fade
+
+Stefan asked for exactly this: "vwap. only long price when it's 2 ATR below vwap and
+take profit at the vwap. only longs. no shorts." Built as `VWAPATRFade` in
+`strategies.py`, registry key **`vwapfade`** (distinct from the existing `vwap` key,
+which is the older `VWAPReversion` trend-following strategy — unrelated, don't confuse
+the two).
+
+**Added `engine.vwap_session()` rather than reusing `vwap_rolling()`.** The existing
+`vwap_rolling(bars, n)` is a fixed N-bar window — an explicitly-documented approximation
+for data with no real session to anchor to. But "VWAP" on an actual chart (including
+TradingView's built-in `ta.vwap()`, which the Pine output below calls directly) means the
+**session-anchored** cumulative version, reset each day. Using the rolling one here would
+have silently disagreed with what Stefan sees plotted on his own chart — exactly the
+"our own reimplementation nobody verified" trap this project has been burned by before
+(see the Lorentzian `normalize_windowed()` saga above). `vwap_session()` resets at every
+new UTC calendar day; bars with no real volume (common on forex feeds) fall back to equal
+weighting rather than NaN.
+
+**No stop-loss, on purpose — that's what was asked for, not an oversight.** The exit is
+"reaches VWAP," full stop; there's no ATR-multiple or structural stop parameter. Flagged
+this to Stefan directly since an unbounded fade against a trend that never reverts is a
+real drawdown risk, but per repo practice (see the "don't add features beyond what the
+task requires" rule) nothing was added he didn't ask for. If he wants a safety stop later,
+it's a small addition, not a redesign.
+
+**Needs intraday bars, like `orb`/`po3`/`asiasweep`.** On the daily `sample` data each
+bar *is* its own session, so `vwap_session()` degenerates to that bar's own typical price
+and the entry condition (close 2 ATR *below* a value derived from that same bar) almost
+never fires — confirmed: 0 trades on `python run.py "vwap fade" --data sample`. This is
+expected, documented in the strategy's own `description` and in `gen.py`'s explanation
+text, not a bug. Verified the actual bar loop works by hand-building 40 days of synthetic
+hourly bars with a real intraday dip — 39 trades, correct long-only entries/exits, VWAP
+and 2xATR band checked directly against the fill bars.
+
+`gen.py` routes "vwap" + ("atr" or "below") to this new strategy (checked *before* the
+older generic "vwap" branch, same ordering discipline used for asiasweep/po3/ifvg above)
+and extracts an explicit multiplier like "3 atr" if given, defaulting to 2.0. `opt.py` got
+a grid (`entry_atr: [1.0..3.0]`, `atr_n: [10,14,20]`); it runs through plain `engine.run()`
+posture logic, not `brackets.py` — the exit target is VWAP itself, which moves every bar,
+and brackets.py's model assumes a fixed price per trade, so it doesn't fit that shape.
+
+Test counts now **`selftest.py` 109, `test_engine.py` 13**.
 
 ## Update: MT5 port added (2026-08-13)
 
