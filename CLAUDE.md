@@ -5,11 +5,15 @@ ends.** Add what was learned, what changed, what broke. Correct anything here th
 out to be wrong — and say plainly that it was wrong, don't quietly delete it. The user
 should never have to re-explain this project from scratch.
 
-Last updated: 2026-08-22 (FIRST REAL VALIDATION: 15.4 years of real NAS100 hourly data,
-via public GitHub repos + Dukascopy mobile export. vwapfade results and the session-anchor
-caveat that flips their sign are in the "first real validation" section below). Also this
-day: the new `vwapfade` strategy and a real session-anchored `vwap_session()` in engine.py
-alongside the old rolling-window `vwap_rolling()`.
+Last updated: 2026-08-22 (OUT-OF-SAMPLE VERDICT: vwapfade does NOT hold up on 2020-2026
+real NAS100 hourly -- +4.24% over 6.6 years, PF 1.02, CI straddles zero. The +134.8% on
+2005-2020 did not persist. See "THE OUT-OF-SAMPLE TEST IS IN" below before quoting any
+number from this project.)
+
+Same day, earlier: the first real market data this project ever had (15.4 years of NAS100
+hourly via public GitHub repos, plus Dukascopy exports), the new `vwapfade` strategy, a
+real session-anchored `vwap_session()` in engine.py alongside the old rolling-window
+`vwap_rolling()`, and `dukascopy_feed.py` for pulling the genuine datafeed archive.
 
 ---
 
@@ -595,10 +599,61 @@ per-instrument.
   2006-2010 (crash, high vol) +36% and +26%; 2014-2018 (calm bull) −5.5% and +2.6%;
   2018-2020 (COVID) +12.7%. It earns in volatile markets and bleeds in calm trending ones.
 
-**True out-of-sample on Stefan's own Jan 2025 export — different vendor, 5 years later,
-nothing refit — is NEGATIVE at anchor 13: −2.27% over 7 trades.** Seven trades proves
-nothing in either direction, and it must not be waved away OR treated as a refutation. It
-is the single most important thing to extend: more 2025 months from Dukascopy.
+### ⚠️⚠️ THE OUT-OF-SAMPLE TEST IS IN, AND `vwapfade` DOES NOT HOLD UP
+
+**2020-01 -> 2026-07 NAS100 hourly, 38,820 bars, params fixed on 2005-2020, nothing
+refit, fee 1bp: +4.24% over six and a half years. 508 trades. Profit factor 1.02.**
+
+That is not a small edge, it is no edge. Expectancy **+0.83/trade, 95% CI −8.01 … +9.68**
+— straddling zero. Win rate 62.4% against a 61.9% breakeven. Monte Carlo (2000
+bootstraps): median +495, **41.8% of resamples lose money**. Max drawdown **28% to earn
+4%**.
+
+Against the in-sample period: 2005-2020 gave +10.52/trade (CI +2.07 … +18.97). The recent
+number is an order of magnitude smaller and no longer separable from zero.
+
+**Costs finish it.** 2020-2026: +15.4% at 0bp, +9.7% at 0.5bp, **+4.2% at 1bp, −5.8% at
+2bp**. Fees are 71% of gross profit. A real NAS100 CFD spread of 1-2bp puts this at or
+below break-even before any slippage. "Edge smaller than costs" — the exact outcome this
+file has warned about since the first session — is what happened.
+
+**Year by year, and this is the useful part:**
+
+| year | trades | return |
+|---|---|---|
+| 2020 | 69 | +10.1% |
+| 2021 | 72 | +5.8% |
+| 2022 | 82 | **−25.4%** |
+| 2023 | 88 | +17.2% |
+| 2024 | 77 | −4.4% |
+| 2025 | 76 | +0.02% |
+| 2026 (part) | 44 | +6.9% |
+
+**2022 is the tell, and it corrects an earlier claim in this file.** The regime story was
+written up as "earns in volatile markets, bleeds in calm trending ones". 2022 was the most
+volatile year of the sample and it was by far the worst. The real distinction is not
+volatility, it is **chop versus sustained trend**: 2022 was a long grinding downtrend, and
+buying 2-ATR dips into one with **no stop-loss** is precisely the failure mode. Volatility
+was never the variable; mean reversion versus trend persistence was.
+
+**What survived:** the anchor signature is still there directionally on this data —
+09:00 NY +4.2% and fixed 14 +2.7% versus −13% to −30% at anchors 0/13/22/23. So the
+cash-open mechanism is real; what has gone is the profit on top of it.
+
+**Do not quote the +134.8% (2005-2020) as this strategy's performance.** It was real as
+computed and it did not persist. Report the out-of-sample number, or report both with the
+recent one first.
+
+**Where that leaves it:** not tradeable as specified. The obvious next experiments, in
+order — (1) a stop-loss, which the 28% drawdown and the 2022 collapse both demand and
+which Stefan explicitly asked to omit; (2) a trend filter so it stands aside in sustained
+downtrends; (3) re-test. Without at least (1) this should not go near the bridge.
+
+**Data provenance, all verified:** `fixtures/real/NAS100_1h_2020_2026.csv`, pulled by
+Stefan with `fetch_dukascopy.py` from `www.dukascopy.com/datafeed`. Checked before use:
+495/495 bars identical to his hand-downloaded January 2025 export at 0.000000%
+disagreement, zero OHLC-invariant violations, no Saturday bars, Sunday-evening opens
+present, no zero-volume padding. The earlier 7-trade Jan-2025 result is superseded.
 
 **Still no stop-loss** (Stefan asked for none). Over 15 years that means some trades ride
 far against before reverting; the Monte Carlo above says nothing about the depth of those
