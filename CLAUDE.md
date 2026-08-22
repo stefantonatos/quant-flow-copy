@@ -5,7 +5,9 @@ ends.** Add what was learned, what changed, what broke. Correct anything here th
 out to be wrong — and say plainly that it was wrong, don't quietly delete it. The user
 should never have to re-explain this project from scratch.
 
-Last updated: 2026-08-22 (new strategy: `vwapfade`, long-only VWAP-ATR mean reversion,
+Last updated: 2026-08-22 (FIRST REAL VALIDATION: 15.4 years of real NAS100 hourly data,
+via public GitHub repos + Dukascopy mobile export. vwapfade results and the session-anchor
+caveat that flips their sign are in the "first real validation" section below).
 plus a real session-anchored `vwap_session()` added to engine.py alongside the old
 rolling-window `vwap_rolling()`).
 
@@ -476,6 +478,80 @@ posture logic, not `brackets.py` — the exit target is VWAP itself, which moves
 and brackets.py's model assumes a fixed price per trade, so it doesn't fit that shape.
 
 Test counts now **`selftest.py` 109, `test_engine.py` 13**.
+
+## Update (2026-08-22, later): THE FIRST REAL VALIDATION IN THIS PROJECT'S HISTORY
+
+**The "no market data" blocker is broken.** Two routes opened on the same day:
+
+1. **Stefan exported real data from his phone.** Dukascopy's web export works on mobile
+   with no login: `fixtures/data/USATECH_1H_2025-01.csv`, Nasdaq-100 CFD, 1-hour, Jan 2025.
+   The web UI caps a 1-hour download at ~1 month, so more months = more downloads.
+2. **`raw.githubusercontent.com` and the git proxy ARE reachable from this container** even
+   though every market-data host (Yahoo, Stooq, Binance, Dukascopy, Frankfurter,
+   AlphaVantage, TwelveData, FMP, Tiingo) still 403s. **Public GitHub repos are therefore a
+   working data channel.** This was never tried before. `FutureSharks/financial-data`
+   (GPL-3) carries NAS100 1-minute bars 2005-2020 from Oanda; `fetch_nas100.py` rebuilds
+   them into **92,506 hourly bars over 15.4 years**.
+
+**Recent intraday index data is NOT on GitHub.** Searched hard: 2021-2026 intraday NAS100
+is the commercially valuable window and nobody dumps it. The recent out-of-sample has to
+keep coming from Dukascopy exports. Don't spend another session searching for it.
+
+### Three bugs the real data exposed immediately, all fixed
+
+- **`load_csv()` returned NaN for every row of a real Dukascopy export.** It names the time
+  column after the TIMEZONE (`Etc/UTC`), so no fixed list of column names can ever match.
+  Now falls back to the first column. The pre-existing loud NaN warning is what caught this
+  — without it the strategies would have silently reported "no setups".
+- **`vwap_session()` reset at UTC midnight**, which for an index CFD trading 23:00->21:00
+  fires an HOUR INTO the session. Added `anchor_hour`. This is not cosmetic: see below.
+- **No way to load multi-file exports.** `load_csv_many()` / `load_path()` stitch a
+  directory or glob, deduped by timestamp and sorted. `run.py --data <dir|glob|file>`.
+  Deduping is load-bearing — a duplicated bar is a second chance to trade one moment.
+
+### `vwapfade` results on 15.4 years of real NAS100 hourly
+
+**The headline is genuinely good and the caveat is genuinely serious. Report both.**
+
+At `anchor_hour=13` (US cash open), fee 1bp, `entry_atr=2.0`:
+1,290 trades · **+129.5%** · expectancy +10.04/trade · win 62.1% · PF 1.23 ·
+**6/8 walk-forward folds profitable** · Monte Carlo (2000 bootstraps) P5 +4,449, median
++12,940, **only 0.9% of resamples lose money**.
+
+**⚠️ THE SESSION ANCHOR FLIPS THE SIGN OF THE ENTIRE RESULT.** Same data, same params:
+
+| anchor_hour | return | expectancy |
+|---|---|---|
+| 0 (UTC midnight) | **−35.5%** | −2.89 |
+| 13 (US cash open) | **+129.5%** | +10.04 |
+| 14 | +89.7% | +6.89 |
+| 21 / 22 / 23 (CFD session) | −23% to −35% | negative |
+
+The case that 13 is legitimate and not a cherry-pick: 13:30 UTC **is** the US equity cash
+open, and session-anchored VWAP from the cash open is what "VWAP" means to an actual
+Nasdaq trader — it is the a priori standard choice, not the best of six. The case for
+caution: six anchors were tested and the best was reported. **Both statements are true.**
+Anyone continuing this must resolve it properly rather than quoting the +129%:
+- **DST is unhandled.** The US cash open is 13:30 UTC in summer and 14:30 in winter, and
+  `anchor_hour` is a fixed integer. A DST-aware anchor is the correct fix and is NOT done.
+- Anchoring should be fixed a priori and then left alone, never swept.
+
+**Two more things that decide this in practice:**
+- **Costs kill it between 3 and 5 bps.** +197% at 0bp, +129% at 1bp, +77% at 2bp, +37% at
+  3bp, **−18% at 5bp**. NAS100 CFD spread is roughly 1-2bp, so it survives a realistic
+  spread and dies on a bad one. "Edge smaller than costs" remains the live risk.
+- **It is regime-dependent, in the direction mean reversion always is.** Fold returns:
+  2006-2010 (crash, high vol) +36% and +26%; 2014-2018 (calm bull) −5.5% and +2.6%;
+  2018-2020 (COVID) +12.7%. It earns in volatile markets and bleeds in calm trending ones.
+
+**True out-of-sample on Stefan's own Jan 2025 export — different vendor, 5 years later,
+nothing refit — is NEGATIVE at anchor 13: −2.27% over 7 trades.** Seven trades proves
+nothing in either direction, and it must not be waved away OR treated as a refutation. It
+is the single most important thing to extend: more 2025 months from Dukascopy.
+
+**Still no stop-loss** (Stefan asked for none). Over 15 years that means some trades ride
+far against before reverting; the Monte Carlo above says nothing about the depth of those
+holds. A safety stop is the obvious next experiment.
 
 ## Update: MT5 port added (2026-08-13)
 
