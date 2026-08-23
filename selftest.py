@@ -1816,6 +1816,74 @@ class TestVWAPATRFade(unittest.TestCase):
         self.assertIsNotNone(later_flat)
         self.assertGreaterEqual(bars[later_flat].c, s.vwap[later_flat] - 1e-9)
 
+    def _falling_bars(self):
+        """Enter, then have price keep going against the trade and never
+        return to VWAP -- the exact case a stop exists for, and the one the
+        recovering fixture above can never produce."""
+        from strategies import VWAPATRFade
+        closes = [100.0] * 20 + [100 - 0.5 * k for k in range(1, 21)]
+        bars = [Bar(t=i * 300, o=c, h=c + 0.3, l=c - 0.3, c=c, v=1.0)
+               for i, c in enumerate(closes)]
+        return bars, VWAPATRFade
+
+    def test_stop_loss_exits_a_trade_that_keeps_falling(self):
+        bars, cls = self._falling_bars()
+        base = cls(bars=bars, params={"entry_atr": 2.0, "atr_n": 5})
+        stopped = cls(bars=bars, params={"entry_atr": 2.0, "atr_n": 5,
+                                        "stop_atr": 1.0})
+        pb = [base.decide(i) for i in range(len(bars))]
+        ps = [stopped.decide(i) for i in range(len(bars))]
+        self.assertIn("LONG", pb, "fixture never entered")
+        self.assertEqual(pb[-1], "LONG", "no-stop run should ride the decline")
+        # The stop must actually let go somewhere the unstopped run held on.
+        released = [i for i in range(len(bars))
+                    if pb[i] == "LONG" and ps[i] == "FLAT"]
+        self.assertTrue(released, "stop_atr never fired")
+        self.assertLess(ps.count("LONG"), pb.count("LONG"))
+
+    def test_a_stopped_out_trade_re_enters_while_the_signal_persists(self):
+        """Documents the behaviour that made stops LOSE money on real data.
+
+        Being stopped out does not suppress the entry condition, so in a
+        sustained decline the strategy exits at a loss and buys straight
+        back in on the next bar -- realising the drawdown repeatedly instead
+        of once. This is why 1 and 2 ATR stops turned a positive period
+        negative (see the table in CLAUDE.md). It is real behaviour worth
+        pinning, not a bug to silently "fix": suppressing re-entry would be
+        a different strategy and must be measured as one.
+        """
+        bars, cls = self._falling_bars()
+        s = cls(bars=bars, params={"entry_atr": 2.0, "atr_n": 5,
+                                   "stop_atr": 1.0})
+        p = [s.decide(i) for i in range(len(bars))]
+        reentries = [i for i in range(1, len(p))
+                     if p[i] == "LONG" and p[i - 1] == "FLAT"]
+        self.assertGreater(len(reentries), 1,
+                           "expected repeated stop-out then re-entry")
+
+    def test_stop_loss_is_off_by_default(self):
+        """Every number recorded in CLAUDE.md was produced without a stop,
+        so the default path must be byte-identical to the old behaviour."""
+        bars, cls = self._falling_bars()
+        a = cls(bars=bars, params={"entry_atr": 2.0, "atr_n": 5})
+        b = cls(bars=bars, params={"entry_atr": 2.0, "atr_n": 5, "stop_atr": 0.0})
+        self.assertEqual([a.decide(i) for i in range(len(bars))],
+                         [b.decide(i) for i in range(len(bars))])
+
+    def test_trend_filter_blocks_entries_below_the_average(self):
+        """The filter exists to stand aside in a downtrend rather than buy
+        every dip in it, so it must strictly reduce the entry count."""
+        bars, cls = self._bars()
+        loose = cls(bars=bars, params={"entry_atr": 2.0, "atr_n": 5})
+        filt = cls(bars=bars, params={"entry_atr": 2.0, "atr_n": 5,
+                                      "trend_n": 10})
+        pl = [loose.decide(i) for i in range(len(bars))]
+        pf = [filt.decide(i) for i in range(len(bars))]
+        self.assertLessEqual(pf.count("LONG"), pl.count("LONG"))
+        for i, posture in enumerate(pf):
+            if posture == "LONG" and pl[i] != "LONG":
+                self.fail("filter created an entry the unfiltered run lacked")
+
     def test_no_drop_means_no_trade(self):
         bars = [Bar(t=i * 3600, o=100, h=100.3, l=99.7, c=100, v=1.0) for i in range(30)]
         from strategies import VWAPATRFade

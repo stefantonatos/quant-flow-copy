@@ -644,10 +644,70 @@ cash-open mechanism is real; what has gone is the profit on top of it.
 computed and it did not persist. Report the out-of-sample number, or report both with the
 recent one first.
 
-**Where that leaves it:** not tradeable as specified. The obvious next experiments, in
-order — (1) a stop-loss, which the 28% drawdown and the 2022 collapse both demand and
-which Stefan explicitly asked to omit; (2) a trend filter so it stands aside in sustained
-downtrends; (3) re-test. Without at least (1) this should not go near the bridge.
+### The two fixes were tried. Neither rescues it. (2026-08-22)
+
+`VWAPATRFade` gained two optional controls, both **off by default** so every number above
+still reproduces: `stop_atr` (exit stop_atr x ATR below entry, fixed at entry, not
+trailing) and `trend_n` (refuse to buy while close is under an SMA of that length).
+
+| config | all years | ex-2022 | 2022 | 2005-2020 | expectancy 95% CI |
+|---|---|---|---|---|---|
+| baseline | +4.1% | +39.5% | −25.4% | +134.8% | +0.83 ± 8.84 |
+| stop 1 ATR | −2.8% | +15.3% | −15.7% | +87.6% | −0.47 ± 5.88 |
+| stop 2 ATR | −3.7% | +19.3% | −19.3% | +112.2% | −0.62 ± 7.04 |
+| stop 3 ATR | +6.9% | +32.8% | −19.5% | +151.4% | +1.30 ± 8.15 |
+| trend SMA100 | +8.4% | +16.1% | **−6.7%** | +16.4% | +5.93 ± 14.81 |
+| stop 2 + SMA100 | +9.4% | +14.1% | **−4.2%** | +11.6% | +6.57 ± 13.31 |
+
+**A stop-loss makes it WORSE, and that is not a fluke of one setting.** 1 and 2 ATR both
+turn a positive period negative; only 3 ATR (loose enough to rarely trigger) helps at all.
+**Do not assume a stop is always risk-reducing — here it is edge-destroying.** This
+contradicts the "obvious next experiment" this file recommended before testing it.
+
+Two mechanisms, and the second was found by debugging a failing test rather than by
+reasoning:
+1. The strategy's whole premise is that price overshoots and comes back. A stop converts
+   precisely the temporary adverse excursion it is betting on into a realised loss, then
+   forfeits the recovery it was waiting for.
+2. **Being stopped out does not suppress the entry signal.** Price is still below the
+   band, so the next bar re-enters — and in a sustained decline that cycle repeats,
+   realising the drawdown several times instead of once. Pinned by
+   `test_a_stopped_out_trade_re_enters_while_the_signal_persists`. Suppressing re-entry
+   (a cooldown, or requiring a fresh cross of the band) is the obvious follow-up, but it
+   is a *different strategy* and must be measured as one, not slipped in as a fix.
+
+**The trend filter does exactly what it was designed to do and it still is not enough.**
+SMA100 cuts 2022 from −25.4% to −6.7%, confirming the chop-versus-trend diagnosis. But it
+also cuts 2005-2020 from +134.8% to +16.4% — most of the historical profit came from
+buying dips in downtrends that did revert. It trades a big win and a big loss for a small
+win and a small loss.
+
+**Nothing reaches significance.** Every 95% CI in that table straddles zero, best case
++6.57 ± 13.31. And eight configurations were tried on the same data, so the best row is
+partly selection: treat +9.4% as an upper bound on a number that is not distinguishable
+from zero anyway.
+
+### ⚠️ "Remove 2022, everyone lost money in 2022" — how that was handled
+
+Stefan asked for 2022 to be dropped. Two things, both worth keeping:
+
+**1. Splicing a year out of a price series is invalid and it showed up immediately.**
+Filtering 2022's bars joins 2021-12-31 (16,343) straight onto 2023-01-02 (10,966) — a
+**−32.9% overnight gap that never happened**, which the strategy then trades through. That
+route reported −6.9% for the baseline, i.e. *worse* than including the −25% year, which is
+what exposed it. The correct way to exclude a period is to score each year independently
+and compound the ones you keep; that gives +39.5%, not −6.9%. **If a future session is
+asked to drop a period, do it by compounding whole periods, never by filtering bars.**
+
+**2. The ex-2022 column is reported but it is not a result.** Removing the worst year from
+any strategy improves it; you cannot remove 2022 from the future. "Everyone lost money in
+2022" is also not accurate as a defence here — trend-following and short-biased systems
+had a good 2022. What failed in 2022 was specifically *buying dips in a sustained
+downtrend*, which is this strategy's core action.
+
+**Where that leaves it:** still not tradeable. The trend filter is the only change that
+addresses a diagnosed failure rather than a symptom, and it costs most of the upside.
+Nothing here should go near the bridge.
 
 **Data provenance, all verified:** `fixtures/real/NAS100_1h_2020_2026.csv`, pulled by
 Stefan with `fetch_dukascopy.py` from `www.dukascopy.com/datafeed`. Checked before use:

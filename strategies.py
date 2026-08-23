@@ -282,17 +282,50 @@ class VWAPATRFade(Strategy):
                                  p.get("anchor_tz"))
         self.atrv = atr(self.bars, p.get("atr_n", 14))
         self.entry_mult = p.get("entry_atr", 2.0)
+
+        # --- the two optional risk controls, both OFF by default ---------
+        # stop_atr: exit when close falls stop_atr x ATR below the entry.
+        #   The 2020-2026 run without one lost 25% in 2022 alone and drew
+        #   down 28%, because "hold until price returns to VWAP" has no
+        #   answer for a trend that simply never returns.
+        # trend_n: refuse to buy while close is under an SMA of this length,
+        #   i.e. stand aside in a sustained downtrend rather than buying
+        #   every dip in it.
+        self.stop_atr = p.get("stop_atr", 0.0)
+        self.trend_n = int(p.get("trend_n", 0))
+        self.trend = sma(self.closes, self.trend_n) if self.trend_n else None
+
         self.holding = False
+        self.stop_px = float("nan")
 
     def decide(self, i):
         v, a = self.vwap[i], self.atrv[i]
         if v != v or a != a:  # nan during warmup
             return "LONG" if self.holding else "FLAT"
         c = self.closes[i]
-        if not self.holding and c <= v - self.entry_mult * a:
-            self.holding = True
-        elif self.holding and c >= v:
-            self.holding = False
+
+        if not self.holding:
+            if c <= v - self.entry_mult * a:
+                ok = True
+                if self.trend is not None:
+                    t = self.trend[i]
+                    ok = (t == t) and c > t
+                if ok:
+                    self.holding = True
+                    # Stop is fixed at entry -- it does not trail. A trailing
+                    # stop is a different strategy, not a safety net.
+                    self.stop_px = (c - self.stop_atr * a
+                                    if self.stop_atr > 0 else float("nan"))
+        else:
+            # Target first: on a bar that both recovers to VWAP and breaches
+            # the stop, treating it as a win would be the optimistic
+            # same-bar resolution this repo refuses everywhere else. But
+            # here the stop is BELOW entry and VWAP is ABOVE it, so a single
+            # close cannot satisfy both -- no ambiguity to resolve.
+            if c >= v:
+                self.holding = False
+            elif self.stop_px == self.stop_px and c <= self.stop_px:
+                self.holding = False
         return "LONG" if self.holding else "FLAT"
 
     def to_pine(self):
