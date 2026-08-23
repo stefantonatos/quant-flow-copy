@@ -116,6 +116,10 @@ def main() -> int:
     ap.add_argument("--start", default="2020-01-01", help="YYYY-MM-DD")
     ap.add_argument("--end", default=None, help="YYYY-MM-DD (default: today)")
     ap.add_argument("--out", default=None, help="output CSV path")
+    ap.add_argument("--interval", default="1h", choices=["1m", "5m", "15m", "1h"],
+                    help="bar size (default 1h). 5m/15m are resampled from the "
+                         "archive's 1-minute files, which is one request PER DAY "
+                         "-- a multi-year pull takes minutes, not seconds.")
     ap.add_argument("--list", action="store_true", help="list known symbols and exit")
     args = ap.parse_args()
 
@@ -136,12 +140,19 @@ def main() -> int:
     end = (datetime.datetime.strptime(args.end, "%Y-%m-%d") if args.end
            else datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None))
 
-    print(f">> {sym} ({SYMBOLS.get(sym, 'unknown instrument')}) @ 1h")
+    print(f">> {sym} ({SYMBOLS.get(sym, 'unknown instrument')}) @ {args.interval}")
     print(f">> {start:%Y-%m-%d} -> {end:%Y-%m-%d}")
-    print(">> reading the datafeed archive, one file per month")
 
     try:
-        bars = F.fetch_hourly(sym, start, end)
+        if args.interval == "1h":
+            print(">> reading the datafeed archive, one file per month")
+            bars = F.fetch_hourly(sym, start, end)
+        else:
+            print(">> reading 1-minute files, one per DAY -- this takes a while")
+            bars = F.fetch_minute(sym, start, end)
+            secs = {"1m": 60, "5m": 300, "15m": 900}[args.interval]
+            if secs > 60:
+                bars = D.resample(bars, secs)
     except Exception as exc:
         print(f"FETCH FAILED: {type(exc).__name__}: {exc}")
         print("If this mentions 403 or a proxy, you are on a machine without "
@@ -153,7 +164,8 @@ def main() -> int:
         return 1
 
     out = args.out or os.path.join(
-        "fixtures", "data", f"{sym}_1h_{start:%Y%m%d}_{end:%Y%m%d}.csv")
+        "fixtures", "data",
+        f"{sym}_{args.interval}_{start:%Y%m%d}_{end:%Y%m%d}.csv")
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     with open(out, "w", newline="") as f:
         w = csv.writer(f)
@@ -169,13 +181,13 @@ def main() -> int:
 
     span_days = max((last - first).days, 1)
     per_day = len(bars) / (span_days * 5 / 7)
-    print(f">> density: {per_day:.1f} bars per trading day "
-          f"(a 23-hour index CFD should be near 23)")
-    if per_day < 12:
-        print("   !! That is too sparse for hourly data. Something thinned it.")
-    elif per_day > 26:
-        print("   !! That is too DENSE -- more bars than there are trading "
-              "hours, so closed-hour padding is still in the file.")
+    expect = {"1h": 23, "15m": 92, "5m": 276, "1m": 1380}[args.interval]
+    print(f">> density: {per_day:.0f} bars per trading day "
+          f"(a 23-hour index CFD should be near {expect})")
+    if per_day < 0.5 * expect:
+        print("   !! Too sparse. Something thinned it.")
+    elif per_day > 1.2 * expect:
+        print("   !! Too DENSE -- closed-hour padding is still in the file.")
 
     # Auto-verify against any reference export sitting in fixtures/data.
     for ref in sorted(glob.glob(os.path.join("fixtures", "data", "USATECH*.csv"))):

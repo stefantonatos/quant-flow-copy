@@ -719,6 +719,81 @@ present, no zero-volume padding. The earlier 7-trade Jan-2025 result is supersed
 far against before reverting; the Monte Carlo above says nothing about the depth of those
 holds. A safety stop is the obvious next experiment.
 
+## Update (2026-08-22, last): `nyopen` — and the trailing stop had to go
+
+Stefan: *"wait for new york open. take the first 5 minute candle. closes above the 12 ema?
+buy. closes below? sell. trailing stop loss"*. Built as `NYOpenEMA`, key **`nyopen`**.
+
+Choices made where the description was silent, all parameters, all listed at the class:
+EMA runs on the same 5-minute series seeded from the overnight session (a 12 EMA built
+only from the day's own bars is undefined on the bar the decision is made); entry at the
+**close** of the opening candle (its open would be lookahead); trail measured from the
+best close since entry at a fixed multiple of ATR **as at entry**; flat at session close.
+The open is located in **exchange-local time**, so DST is handled — same trap as
+`vwap_session`, test-locked by `test_the_open_is_found_in_exchange_local_time`.
+
+**Needs 5-minute bars.** `data.resample()` on the FutureSharks 1-minute archive gives
+1,014,870 five-minute NAS100 bars, 2005-01 -> 2020-05. `dukascopy_feed.fetch_minute()`
+was added for the recent window — minute candles live in one file **per day**, so a
+multi-year pull is thousands of requests and takes minutes; `fetch_dukascopy.py
+--interval 5m` drives it.
+
+### ⚠️ THE TRAILING STOP IS THE WORST PART OF THIS STRATEGY
+
+Sweeping the one number the description never specified, on 4,760 trades over 15 years:
+
+| trail | net @1bp | gross @0bp |
+|---|---|---|
+| 0.5 ATR | −50.7% | +27.8% |
+| 1.0 | −33.9% | +71.2% |
+| 2.0 | −25.8% | +92.2% |
+| 3.0 | +14.0% | +195.3% |
+| 6.0 | +132.4% | +501.0% |
+| 20.0 | +296.4% | +920.5% |
+| **none (hold to close)** | **+329.7%** | **+1006.3%** |
+
+Monotonic in the width of the stop, all the way out to not having one. The trailing stop
+is not a risk control here, it is the single biggest drag on the strategy. **This is the
+second strategy in a row where the stop Stefan specified destroyed the edge** (see
+`vwapfade` above), and for a related reason: both exit on adverse movement that the
+strategy is implicitly betting will reverse within the session.
+
+### The control tests, which is what makes this one interesting
+
+No trail, hold to close, fee 1bp, 2005-2020:
+
+| | return | expectancy (95% CI) |
+|---|---|---|
+| **EMA decides direction** | **+329.7%** | **+6.97 ± 4.68 — excludes zero** |
+| CONTROL: always long | −49.7% | −1.05 ± 1.49 |
+| CONTROL: always short | −80.5% | −1.70 ± 2.36 |
+| CONTROL: coin flip | −84.4% | −1.78 ± 1.81 |
+
+**Every control loses money and the EMA version does not.** That is a much stronger result
+than anything `vwapfade` produced — the signal is doing real work, not harvesting drift.
+Note *always long* losing 49.7% while buy-and-hold made +455.8% over the same period:
+NAS100's gains are overnight, and the cash session open-to-close is roughly a coin flip.
+That is exactly why a directional filter can add value here.
+
+**Run the controls before believing any future strategy.** They cost minutes and they are
+the difference between "this makes money" and "this makes money *because of the signal*".
+
+### The honest caveats, which are serious
+
+- **It underperforms buy-and-hold** (+329.7% vs +455.8%) over the same 15 years, though on
+  ~6.5 hours of exposure a day rather than 24/7.
+- **Only the long side is significant.** Longs +9.39 ± 6.49 (excludes zero); shorts
+  +4.52 ± 6.75 (includes zero). `allow_short=False` is a live option.
+- **Costs decide it**: +1006% at 0bp, +330% at 1bp, +67% at 2bp, **−35% at 3bp**. It takes
+  a trade every single day, so cost per trade is the whole game.
+- **Profit is concentrated in crisis periods.** Walk-forward 7/8 folds positive, but
+  2007-2009 gave +95% and 2018-2020 +104% while 2014-2016 gave +0.4%.
+- **⚠️ This is all 2005-2020 — the SAME in-sample window where `vwapfade` looked
+  spectacular and then died out of sample.** Do not repeat that mistake. The 2020-2026
+  5-minute pull is the next step and nothing here should be believed until it runs.
+- Removing the trailing stop was a decision made by sweeping on this data, so it carries
+  selection risk like everything else here.
+
 ## Update: MT5 port added (2026-08-13)
 
 Stefan asked to backtest through MetaTrader 5. No free, open-source MQL5 port of

@@ -18,3 +18,4 @@ Thumbs.db
 .idea/
 .vscode/
 fixtures/data_nas100_1h/
+fixtures/data_nas100_5m/

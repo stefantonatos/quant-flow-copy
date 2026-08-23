@@ -1783,6 +1783,65 @@ class TestVWAPAnchorDST(unittest.TestCase):
         self.assertAlmostEqual(vwap_session(bars)[1], 150.0, places=6)
 
 
+class TestNYOpenEMA(unittest.TestCase):
+    """5-minute bars spanning one New York session."""
+
+    @staticmethod
+    def _session(closes, start_iso="2025-06-02T12:00"):
+        import datetime as dt
+        from strategies import NYOpenEMA
+        t0 = dt.datetime.fromisoformat(start_iso).replace(
+            tzinfo=dt.timezone.utc).timestamp()
+        bars = [Bar(t=t0 + i * 300, o=c, h=c + 0.5, l=c - 0.5, c=c, v=100.0)
+               for i, c in enumerate(closes)]
+        return bars, NYOpenEMA
+
+    def test_exactly_one_entry_per_session(self):
+        """'The first 5-minute candle' means one trade a day, not one per bar
+        that happens to sit the right side of the EMA."""
+        bars, cls = self._session([100 + i * 0.2 for i in range(80)])
+        s = cls(bars=bars, params={"trail_atr": 999.0})
+        self.assertEqual(sum(s.is_open_bar), 1, "expected one opening bar")
+        p = [s.decide(i) for i in range(len(bars))]
+        entries = [i for i in range(1, len(p))
+                   if p[i] != "FLAT" and p[i - 1] == "FLAT"]
+        self.assertEqual(len(entries), 1)
+
+    def test_direction_follows_the_ema(self):
+        """Rising into the open must go long; falling must go short."""
+        up, cls = self._session([100 + i * 0.3 for i in range(60)])
+        s = cls(bars=up, params={"trail_atr": 999.0})
+        pu = [s.decide(i) for i in range(len(up))]
+        self.assertIn("LONG", pu)
+        self.assertNotIn("SHORT", pu)
+
+        down, _ = self._session([100 - i * 0.3 for i in range(60)])
+        s2 = cls(bars=down, params={"trail_atr": 999.0})
+        pd = [s2.decide(i) for i in range(len(down))]
+        self.assertIn("SHORT", pd)
+        self.assertNotIn("LONG", pd)
+
+    def test_allow_short_false_suppresses_shorts_entirely(self):
+        down, cls = self._session([100 - i * 0.3 for i in range(60)])
+        s = cls(bars=down, params={"trail_atr": 999.0, "allow_short": False})
+        p = [s.decide(i) for i in range(len(down))]
+        self.assertNotIn("SHORT", p)
+
+    def test_the_open_is_found_in_exchange_local_time(self):
+        """09:30 New York is 13:30 UTC in summer and 14:30 in winter. A fixed
+        UTC hour is wrong for half of every year -- the same DST trap already
+        documented for vwap_session."""
+        import datetime as dt
+        summer, cls = self._session([100.0] * 60, "2025-06-02T12:00")
+        winter, _ = self._session([100.0] * 60, "2025-01-02T12:00")
+        for bars, want_utc_hour in ((summer, 13), (winter, 14)):
+            s = cls(bars=bars, params={})
+            idx = s.is_open_bar.index(True)
+            when = dt.datetime.fromtimestamp(bars[idx].t, dt.timezone.utc)
+            self.assertEqual(when.hour, want_utc_hour)
+            self.assertEqual(when.minute, 30)
+
+
 class TestVWAPATRFade(unittest.TestCase):
     """Long only: enter 2x ATR below session VWAP, exit at VWAP."""
 

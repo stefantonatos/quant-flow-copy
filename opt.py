@@ -32,6 +32,10 @@ PARAM_GRIDS: Dict[str, Dict[str, list]] = {
     # anchor is a fact about the exchange, not a parameter to fit -- and the
     # confidence intervals in CLAUDE.md show the returns cannot tell the
     # anchors apart anyway, so sweeping it would be fitting noise.
+    # trail_atr is the parameter the description never specified, and the
+    # sweep showed it is monotonically harmful -- see CLAUDE.md.
+    "nyopen": {"ema_n": [8, 12, 20], "trail_atr": [2.0, 4.0, 999.0],
+               "allow_short": [True, False]},
     "vwapfade": {"entry_atr": [1.0, 1.5, 2.0, 2.5, 3.0], "atr_n": [10, 14, 20]},
     "supertrend": {"n": [7, 10, 14], "mult": [2.0, 3.0, 4.0]},
     "roc": {"n": [5, 10, 20]},

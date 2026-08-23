@@ -350,6 +350,115 @@ class VWAPATRFade(Strategy):
                 f"color=color.red, size=size.tiny)\n")
 
 
+class NYOpenEMA(Strategy):
+    name = "NY Open EMA Break"
+    description = ("At the New York cash open, take the first 5-minute candle: "
+                   "close above the 12 EMA goes long, below goes short. Exit on "
+                   "a trailing stop. One trade per day, flat by session close. "
+                   "Needs 5-minute bars -- on anything coarser 'the first "
+                   "5-minute candle' does not exist.")
+
+    # ---- decisions made where the description was silent -----------------
+    # These are choices, not rules handed down, and each one moves the result:
+    #   * The EMA runs on the SAME 5-minute series and is seeded from the
+    #     overnight session, so at 09:30 it already carries 12 real bars.
+    #     A 12 EMA computed from only the day's own bars would be undefined
+    #     on the very bar the decision is made.
+    #   * Entry is at the CLOSE of that first candle -- the bar whose close
+    #     generates the signal. Entering at its open would be lookahead.
+    #   * The trail is measured from the best CLOSE since entry, at a fixed
+    #     multiple of the ATR *as at entry*. Using live ATR makes the stop
+    #     breathe with volatility, which is defensible but is a different
+    #     strategy; this keeps the risk unit fixed the way a trader placing
+    #     one order would.
+    #   * Flat at session end. Nothing in the description implies carrying
+    #     an intraday momentum trade overnight through the gap.
+    def prepare(self):
+        import zoneinfo
+        p = self.params
+        bars = self.bars
+        self.ema12 = ema(self.closes, int(p.get("ema_n", 12)))
+        self.atrv = atr(bars, int(p.get("atr_n", 14)))
+        self.trail_atr = float(p.get("trail_atr", 2.0))
+        self.allow_short = bool(p.get("allow_short", True))
+
+        tz = zoneinfo.ZoneInfo(p.get("session_tz", "America/New_York"))
+        open_h = int(p.get("open_hour", 9))
+        open_m = int(p.get("open_min", 30))
+        close_h = int(p.get("close_hour", 16))
+
+        # Mark the first bar at or after the cash open on each local day, and
+        # the bars that are past the close. Doing this in exchange-local time
+        # is what makes it survive DST -- 09:30 New York is 13:30 UTC in
+        # summer and 14:30 in winter, so a fixed UTC hour is wrong half the
+        # year (the same trap already documented for vwap_session).
+        self.is_open_bar = [False] * len(bars)
+        self.past_close = [False] * len(bars)
+        seen = set()
+        for i, b in enumerate(bars):
+            lt = datetime.datetime.fromtimestamp(b.t, tz)
+            mins = lt.hour * 60 + lt.minute
+            if mins >= close_h * 60:
+                self.past_close[i] = True
+            if mins >= open_h * 60 + open_m and lt.date() not in seen:
+                seen.add(lt.date())
+                self.is_open_bar[i] = True
+
+        self.pos = "FLAT"
+        self.best = float("nan")     # best close since entry
+        self.entry_atr = float("nan")
+
+    def decide(self, i):
+        c = self.closes[i]
+
+        if self.pos != "FLAT":
+            # Session end closes the trade regardless of the trail.
+            if self.past_close[i]:
+                self.pos = "FLAT"
+                return "FLAT"
+            if self.pos == "LONG":
+                self.best = c if self.best != self.best else max(self.best, c)
+                if c <= self.best - self.trail_atr * self.entry_atr:
+                    self.pos = "FLAT"
+            else:
+                self.best = c if self.best != self.best else min(self.best, c)
+                if c >= self.best + self.trail_atr * self.entry_atr:
+                    self.pos = "FLAT"
+            return self.pos
+
+        # Only the opening bar can start a trade -- one per day.
+        if not self.is_open_bar[i]:
+            return "FLAT"
+        e, a = self.ema12[i], self.atrv[i]
+        if e != e or a != a or a <= 0:
+            return "FLAT"
+        if c > e:
+            self.pos = "LONG"
+        elif c < e and self.allow_short:
+            self.pos = "SHORT"
+        else:
+            return "FLAT"
+        self.best = c
+        self.entry_atr = a
+        return self.pos
+
+    def to_pine(self):
+        p = self.params
+        return (f"//@version=6\n"
+                f"strategy(\"NY Open EMA Break\", overlay=true)\n"
+                f"// Run this on a 5-minute chart.\n"
+                f"e = ta.ema(close, {int(p.get('ema_n', 12))})\n"
+                f"a = ta.atr({int(p.get('atr_n', 14))})\n"
+                f"isOpen = ta.change(time('D')) != 0\n"
+                f"// entry on the first bar of the session, direction from the EMA\n"
+                f"if isOpen and close > e\n"
+                f"    strategy.entry(\"L\", strategy.long)\n"
+                f"if isOpen and close < e\n"
+                f"    strategy.entry(\"S\", strategy.short)\n"
+                f"strategy.exit(\"xL\", \"L\", trail_points=a * {p.get('trail_atr', 2.0)} / syminfo.mintick)\n"
+                f"strategy.exit(\"xS\", \"S\", trail_points=a * {p.get('trail_atr', 2.0)} / syminfo.mintick)\n")
+
+
 class SupertrendFollow(Strategy):
     name = "Supertrend Follow"
     description = "Long while Supertrend direction is up."
@@ -1539,6 +1648,7 @@ REGISTRY = {
     "stoch": StochasticReversion,
     "vwap": VWAPReversion,
     "vwapfade": VWAPATRFade,
+    "nyopen": NYOpenEMA,
     "supertrend": SupertrendFollow,
     "roc": MomentumROC,
     "bollrsi": BollingerRSI,

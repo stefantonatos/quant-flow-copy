@@ -153,6 +153,47 @@ def parse_candles(blob: bytes, period_start: datetime.datetime,
     return bars, layout
 
 
+def fetch_minute(symbol: str, start: datetime.datetime, end: datetime.datetime,
+                 progress: bool = True, drop_padding: bool = True) -> List[Bar]:
+    """1-minute bars for [start, end), read DAY BY DAY from the archive.
+
+    The hourly candles live in one file per month; minute candles live in one
+    file per DAY, so a multi-year pull is a few thousand requests and takes
+    minutes rather than seconds. That is the cost of the resolution -- there
+    is no monthly minute file to shortcut it.
+
+    Resample the result if you want 5-minute bars; do NOT be tempted to fetch
+    a coarser interval and pretend, because "the first 5-minute candle of the
+    session" only exists at 5-minute resolution.
+    """
+    scale = 10 ** DECIMALS.get(symbol.upper(), DEFAULT_DECIMALS)
+    out: List[Bar] = []
+    layout: Optional[str] = None
+    day = datetime.datetime(start.year, start.month, start.day)
+    n_days = 0
+    while day < end:
+        # Weekends 404 by design; skip the request entirely rather than
+        # spending a round trip to be told the market was shut.
+        if day.weekday() < 5 or day.weekday() == 6:
+            raw = _get(_url_min_candles(symbol, day.year, day.month - 1, day.day))
+            if raw:
+                bars, layout = parse_candles(decompress(raw), day, scale, layout)
+                keep = [b for b in bars
+                        if start.timestamp() <= b.t < end.timestamp()]
+                if drop_padding:
+                    keep = [b for b in keep if not is_padding(b)]
+                out.extend(keep)
+        n_days += 1
+        if progress and n_days % 25 == 0:
+            print(f"   {day:%Y-%m-%d}: {len(out):>9,} bars so far")
+        day += datetime.timedelta(days=1)
+    out.sort(key=lambda b: b.t)
+    seen = {}
+    for b in out:
+        seen[b.t] = b
+    return [seen[t] for t in sorted(seen)]
+
+
 def is_padding(b: Bar) -> bool:
     """True for a filler bar the archive emits for a CLOSED hour.
 

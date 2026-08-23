@@ -59,6 +59,20 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
                 f"sweep + close-back-inside, trades the reversal through NY. One trade/day.")
         return "po3", params, expl
 
+    # ---- NY open + EMA direction (before the generic ema/orb matches) ----
+    if ("new york" in t or "ny open" in t or "nyopen" in t) and "ema" in t:
+        import re as _re
+        n = 12
+        m = _re.search(r"(\d+)\s*ema", t)
+        if m:
+            n = int(m.group(1))
+        params = {"ema_n": n, "trail_atr": 2.0}
+        expl = (f"Matched NY OPEN EMA BREAK ({n} EMA). At the New York cash open, "
+                f"take the first 5-minute candle: close above the EMA goes long, "
+                f"below goes short. Trailing stop, one trade per day, flat at the "
+                f"session close. NEEDS 5-MINUTE BARS.")
+        return "nyopen", params, expl
+
     # ---- Opening Range Breakout (check before the generic "breakout" -> donchian match) ----
     if "orb" in t.split() or "opening range" in t:
         n = _first_int(t, 6)
