@@ -31,6 +31,23 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
     """
     t = text.lower()
 
+    # ---- Asia sweep + CSD / iFVG -------------------------------------------
+    # MUST come before the Power-of-3 branch below: that one matches the bare
+    # word "amd", so "AMD with iFVG" would otherwise be swallowed by it. These
+    # are different strategies -- po3 enters on a close back inside the range
+    # and targets a fixed R multiple; this enters on a change in the state of
+    # delivery and targets the opposite side of the range.
+    if (("asia" in t and ("sweep" in t or "csd" in t or "delivery" in t))
+            or "asiasweep" in t or "ifvg" in t or "inverse fair value" in t
+            or ("amd" in t.split() and ("fvg" in t or "gap" in t))):
+        mode = "ifvg" if ("ifvg" in t or "inverse fair value" in t or "gap" in t) else "candle"
+        params = {"csd_mode": mode, "stop_buffer_atr": 0.10, "one_per_day": True}
+        expl = (f"Matched ASIA SWEEP + CSD (mode: {mode}). Mark the Asian range, wait "
+                f"for a sweep of one side, enter on a change in the state of delivery "
+                f"back the other way, target the opposite side. Run with --bracket; "
+                f"needs intraday bars with UTC timestamps.")
+        return "asiasweep", params, expl
+
     # ---- Power of 3 / AMD (ICT-style accumulation/manipulation/distribution) ----
     if "power of 3" in t or "po3" in t.split() or "accumulation" in t or "amd" in t.split():
         rr = 2.0
@@ -41,6 +58,20 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
         expl = (f"Matched POWER OF 3 / AMD (target {rr}R). Marks the Asian range, waits for a London "
                 f"sweep + close-back-inside, trades the reversal through NY. One trade/day.")
         return "po3", params, expl
+
+    # ---- NY open + EMA direction (before the generic ema/orb matches) ----
+    if ("new york" in t or "ny open" in t or "nyopen" in t) and "ema" in t:
+        import re as _re
+        n = 12
+        m = _re.search(r"(\d+)\s*ema", t)
+        if m:
+            n = int(m.group(1))
+        params = {"ema_n": n, "trail_atr": 2.0}
+        expl = (f"Matched NY OPEN EMA BREAK ({n} EMA). At the New York cash open, "
+                f"take the first 5-minute candle: close above the EMA goes long, "
+                f"below goes short. Trailing stop, one trade per day, flat at the "
+                f"session close. NEEDS 5-MINUTE BARS.")
+        return "nyopen", params, expl
 
     # ---- Opening Range Breakout (check before the generic "breakout" -> donchian match) ----
     if "orb" in t.split() or "opening range" in t:
@@ -70,6 +101,24 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
                 f"Long when close < lower band and RSI < {ov}; exit when RSI > {ob} or close > upper band.")
         return "bollrsi", params, expl
 
+    # ---- No Wick retrace (@bardfx) -- before the generic "structure" match ----
+    if "no wick" in t or "nowick" in t or "wickless" in t or "no-wick" in t:
+        params = {"rr": 1.0, "trend_mode": "structure", "stop_mode": "candle",
+                  "stop_buffer_atr": 0.50}
+        expl = ("Matched NO WICK RETRACE. Mark a with-trend candle missing its "
+                "trend-side wick, wait for price to retrace to that flat edge, "
+                "enter there with a 1:1 target. Run with --bracket; entry is a "
+                "resting limit at the level, not the bar's close.")
+        return "nowick", params, expl
+
+    # ---- Supply/Demand + market structure (TradingLab video strategy) ----
+    if ("sdz" in t.split() or "supply" in t or "demand" in t
+            or "market structure" in t or "structure" in t.split()):
+        params = {"min_rr": 2.5, "pivot_lookback": 5, "impulse_atr": 2.0}
+        expl = ("Matched SUPPLY/DEMAND + STRUCTURE. Trade with the trend (HH/HL or "
+                "LL/LH) off demand/supply zones, only when reward:risk >= 2.5.")
+        return "sdz", params, expl
+
     # ---- Lorentzian Classification (ML / KNN) ----
     if "lorentzian" in t or "knn" in t or "k-nearest" in t or "machine learning" in t:
         params = {"neighbors": 8, "max_bars_back": 2000}
@@ -88,6 +137,20 @@ def plan_from_text(text: str) -> Tuple[str, dict, str]:
         params = {"n": n, "oversold": 20, "overbought": 80}
         expl = f"Matched STOCHASTIC REVERSION (period {n}). Long when %K < 20, exits when %K > 80."
         return "stoch", params, expl
+
+    # ---- VWAP + ATR band fade (long only) -- before the generic vwap match ----
+    if "vwap" in t and ("atr" in t or "below" in t):
+        mult = 2.0
+        m = re.search(r"(\d+\.?\d*)\s*atr", t)
+        if m:
+            mult = float(m.group(1))
+        params = {"entry_atr": mult, "atr_n": 14}
+        expl = (f"Matched VWAP ATR FADE (long only, {mult}x ATR). Enter long when "
+                f"close is {mult} ATR below the session VWAP, exit at VWAP. No "
+                f"shorts, no stop-loss -- as specified. Needs intraday bars; on "
+                f"daily sample data each bar is its own session so it will "
+                f"trade little to nothing.")
+        return "vwapfade", params, expl
 
     # ---- VWAP ----
     if "vwap" in t:

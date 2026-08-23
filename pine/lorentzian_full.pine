@@ -170,11 +170,27 @@ type Filter
 // ==== Helper Functions ====
 // ==========================
 
-series_from(feature_string, _close, _high, _low, _hlc3, f_paramA, f_paramB) =>
+normalize_windowed(series float src, float rmin, float rmax, simple int fnl) =>
+    hi = ta.highest(src, fnl)
+    lo = ta.lowest(src, fnl)
+    rmin + (rmax - rmin) * (src - lo) / math.max(hi - lo, 10e-10)
+
+n_cci_fnl(series float src, simple int n1, simple int n2, simple int fnl) =>
+    normalize_windowed(ta.ema(ta.cci(src, n1), n2), 0, 1, fnl)
+
+n_wt_fnl(series float src, simple int n1, simple int n2, simple int fnl) =>
+    ema1 = ta.ema(src, n1)
+    ema2 = ta.ema(math.abs(src - ema1), n1)
+    ci = (src - ema1) / (0.015 * ema2)
+    wt1 = ta.ema(ci, n2)
+    wt2 = ta.sma(wt1, 4)
+    normalize_windowed(wt1 - wt2, 0, 1, fnl)
+
+series_from(feature_string, _close, _high, _low, _hlc3, f_paramA, f_paramB, f_fnl) =>
     switch feature_string
         "RSI" => ml.n_rsi(_close, f_paramA, f_paramB)
-        "WT" => ml.n_wt(_hlc3, f_paramA, f_paramB)
-        "CCI" => ml.n_cci(_close, f_paramA, f_paramB)
+        "WT" => n_wt_fnl(_hlc3, f_paramA, f_paramB, f_fnl)
+        "CCI" => n_cci_fnl(_close, f_paramA, f_paramB, f_fnl)
         "ADX" => ml.n_adx(_high, _low, _close, f_paramA)
 
 get_lorentzian_distance(int i, int featureCount, FeatureSeries featureSeries, FeatureArrays featureArrays) =>
@@ -203,7 +219,7 @@ Settings settings =
  Settings.new(
    input.source(title='Source', defval=close, group="General Settings", tooltip="Source of the input data"),
    input.int(title='Neighbors Count', defval=8, group="General Settings", minval=1, maxval=100, step=1, tooltip="Number of neighbors to consider"),
-   input.int(title="Max Bars Back", defval=2000, group="General Settings"),
+   input.int(title="Max Bars Back", defval=500, group="General Settings"),
    input.int(title="Feature Count", defval=5, group="Feature Engineering", minval=2, maxval=5, tooltip="Number of features to use for ML predictions."),
    input.int(title="Color Compression", defval=1, group="General Settings", minval=1, maxval=10, tooltip="Compression factor for adjusting the intensity of the color scale."),
    input.bool(title="Show Default Exits", defval=false, group="General Settings", tooltip="Default exits occur exactly 4 bars after an entry signal. This corresponds to the predefined length of a trade during the model's training process.", inline="exits"),
@@ -218,6 +234,8 @@ useWorstCase = input.bool(false, "Use Worst Case Estimates", tooltip="Whether to
 // When enabled, this option allows the ML model to analyze the entire chart history for pattern recognition,
 // helping to identify rare but significant patterns across different market regimes that might not appear in recent data.
 includeFullHistory = input.bool(title="Include Full History", defval=false, group="General Settings", tooltip="Extends back to the beginning of the chart's history to pick up exotic fractals for training a model. This can be useful for finding rare but significant historical patterns that might not appear in the recent price action. It can provide valuable insights by capturing patterns from different market regimes throughout the chart's history.")
+
+featureNormLength = input.int(title="Feature Normalization Length", defval=100, minval=2, group="General Settings", tooltip="Rolling window used to rescale the CCI and WaveTrend features before distance comparison. Not part of jdehorty's original library -- his normalize() uses the whole chart's all-time high/low -- this reproduces the paid version's windowed version instead.")
 
 // Settings object for user-defined settings
 FilterSettings filterSettings =
@@ -257,11 +275,11 @@ f5_paramB = input.int(title="Parameter B", tooltip="The secondary parameter of f
 // FeatureSeries Object: Calculated Feature Series based on Feature Variables
 featureSeries =
  FeatureSeries.new(
-   series_from(f1_string, close, high, low, hlc3, f1_paramA, f1_paramB), // f1
-   series_from(f2_string, close, high, low, hlc3, f2_paramA, f2_paramB), // f2
-   series_from(f3_string, close, high, low, hlc3, f3_paramA, f3_paramB), // f3
-   series_from(f4_string, close, high, low, hlc3, f4_paramA, f4_paramB), // f4
-   series_from(f5_string, close, high, low, hlc3, f5_paramA, f5_paramB)  // f5
+   series_from(f1_string, close, high, low, hlc3, f1_paramA, f1_paramB, featureNormLength), // f1
+   series_from(f2_string, close, high, low, hlc3, f2_paramA, f2_paramB, featureNormLength), // f2
+   series_from(f3_string, close, high, low, hlc3, f3_paramA, f3_paramB, featureNormLength), // f3
+   series_from(f4_string, close, high, low, hlc3, f4_paramA, f4_paramB, featureNormLength), // f4
+   series_from(f5_string, close, high, low, hlc3, f5_paramA, f5_paramB, featureNormLength)  // f5
  )
 
 // FeatureArrays Variables: Storage of Feature Series as Feature Arrays Optimized for ML

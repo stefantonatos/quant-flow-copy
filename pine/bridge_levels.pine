@@ -1,0 +1,236 @@
+//@version=6
+// ============================================================================
+// ==== BRIDGE LEVELS =========================================================
+// ============================================================================
+//
+// The indicator half of the TradingView -> MT5 bridge, for accounts that
+// cannot use alerts.
+//
+// WHY THIS EXISTS
+// TradingView's free plan allows 3 PRICE alerts and ZERO technical alerts,
+// and anything driven by a Pine script counts as technical. So on a free
+// account no script here can ever fire an alert -- which is exactly why the
+// commercial bridges ship a browser extension and an indicator instead of
+// using alerts at all.
+//
+// This script's job is therefore not to signal. It is to PUBLISH three
+// numbers -- entry, stop, target -- as named plots, because TradingView
+// prints plot values in the chart's status line, where the extension can read
+// them. Hence the plot titles below being plain words: they are an interface,
+// not decoration. Renaming them breaks the extension's "Read levels from
+// chart" button.
+//
+// TWO WAYS TO USE IT
+//   Manual   -- type an entry, stop and target into the settings. The script
+//               draws the bracket and publishes the numbers. Good for a trade
+//               you have picked by eye.
+//   Strategy -- point it at one of the repo's setups and it fills the levels
+//               in for you when that setup appears.
+//
+// HOW THE TRADE ACTUALLY EXECUTES
+// The extension sends these levels to MT5 as a PENDING LIMIT ORDER. Your
+// broker then fills it when price arrives, on their servers, whether or not
+// your browser is open. The paid services instead keep a browser tab watching
+// price and fire a market order on touch; a resting limit does the same job
+// with fewer things that can be switched off at the wrong moment.
+// ============================================================================
+
+indicator("Bridge Levels", shorttitle="Bridge", overlay=true,
+          max_lines_count=100, max_labels_count=100, max_boxes_count=100)
+
+grpTrade = "Trade"
+grpDisp  = "Display"
+
+mode = input.string("manual", "Levels from", options=["manual", "nowick", "asia"],
+     group=grpTrade,
+     tooltip="manual = you type the numbers. nowick/asia = derived from that setup when it appears.")
+
+side      = input.string("long", "Direction", options=["long", "short"], group=grpTrade)
+
+// confirm=true ON PURPOSE: adding the indicator asks you to click the three
+// prices straight onto the chart, which is the whole point -- marking a setup
+// by eye, not typing decimals.
+//
+// CORRECTION, checked against TradingView's own docs and confirmed by a
+// screenshot of the actual Settings dialog: there is no picker icon there.
+// Pine gives a script no way to reopen that click-through prompt, and no way
+// to move these points from code -- input.price is read-only to the script.
+// The prompt fires exactly once, when the indicator is added.
+//
+// The only click-only (no typing) way to move an already-placed level is:
+// click the indicator's NAME in the chart legend (this selects it and shows
+// its handles) -> drag each handle to the new price. That is the real
+// "reset" -- there isn't a button, this IS the button. It only works while
+// the handles are on screen, which is why the snap-to-symbol fallback below
+// exists: on a wildly different-priced symbol the *published* levels snap to
+// something visible, but the handles themselves are still stuck at the old
+// price and off-screen -- Pine cannot move them, only you dragging can.
+manEntry  = input.price(0.0, "Entry",  group=grpTrade, confirm=true)
+manStop   = input.price(0.0, "Stop",   group=grpTrade, confirm=true)
+manTarget = input.price(0.0, "Target", group=grpTrade, confirm=true)
+clearAll  = input.bool(false, "Clear levels", group=grpTrade,
+     tooltip="Tick to blank the levels without deleting the indicator. The extension then reads nothing, so a stale setup cannot be sent by accident. Untick to bring them back.")
+
+atrLen        = input.int(14, "ATR Length", minval=1, group=grpTrade)
+stopBufferATR = input.float(0.50, "Stop buffer (x ATR, auto modes)", minval=0.01, step=0.05, group=grpTrade)
+rr            = input.float(1.0, "Target R multiple (auto modes)", minval=0.1, step=0.1, group=grpTrade)
+wickTolFrac   = input.float(0.0, "Wick tolerance (fraction of range)", minval=0, maxval=0.5, step=0.01, group=grpTrade)
+asiaSess      = input.session("0000-0900", "Asia session (asia mode)", group=grpTrade)
+sessTZ        = input.string("UTC", "Session timezone", group=grpTrade)
+
+showBox   = input.bool(true, "Draw the bracket", group=grpDisp)
+tpColor   = input.color(#089981, "Target", group=grpDisp)
+slColor   = input.color(#F23645, "Stop", group=grpDisp)
+boxTransp = input.int(82, "Box transparency", minval=0, maxval=100, group=grpDisp)
+
+// ---- indicators: global scope only ----------------------------------------
+atrVal = ta.atr(atrLen)
+inAsia = not na(time(timeframe.period, asiaSess, sessTZ))
+
+var float asiaHigh = na
+var float asiaLow  = na
+var float liveHigh = na
+var float liveLow  = na
+
+asiaStarted = inAsia and not inAsia[1]
+if asiaStarted
+    liveHigh := high
+    liveLow  := low
+else if inAsia
+    liveHigh := math.max(nz(liveHigh, high), high)
+    liveLow  := math.min(nz(liveLow, low), low)
+if not inAsia and inAsia[1]
+    asiaHigh := liveHigh
+    asiaLow  := liveLow
+
+// ---- nowick mode: the most recent with-trend wickless candle --------------
+tolLimit = wickTolFrac * (high - low)
+bullMark = close > open and (open - low) <= tolLimit
+bearMark = close < open and (high - open) <= tolLimit
+
+var float autoEntry = na
+var float autoStop  = na
+var float autoTgt   = na
+var bool  autoLong  = true
+
+if mode == "nowick" and not na(atrVal) and atrVal > 0
+    if bullMark
+        autoEntry := low
+        autoStop  := low - stopBufferATR * atrVal
+        autoTgt   := low + rr * (low - (low - stopBufferATR * atrVal))
+        autoLong  := true
+    else if bearMark
+        autoEntry := high
+        autoStop  := high + stopBufferATR * atrVal
+        autoTgt   := high - rr * ((high + stopBufferATR * atrVal) - high)
+        autoLong  := false
+
+if mode == "asia" and not na(asiaHigh) and not na(asiaLow) and not na(atrVal) and atrVal > 0
+    if not inAsia and low < asiaLow
+        autoEntry := close
+        autoStop  := low - stopBufferATR * atrVal
+        autoTgt   := asiaHigh
+        autoLong  := true
+    else if not inAsia and high > asiaHigh
+        autoEntry := close
+        autoStop  := high + stopBufferATR * atrVal
+        autoTgt   := asiaLow
+        autoLong  := false
+
+isLong = mode == "manual" ? side == "long" : autoLong
+
+// ---------------------------------------------------------------------------
+// STALE LEVELS FROM ANOTHER SYMBOL
+//
+// Switch this chart from EURNZD (1.96) to XAUUSD (3000) and the manual levels
+// stay where they were -- far off-screen, and impossible to drag back because
+// you cannot grab a line you cannot see. That makes the indicator feel broken
+// on every pair except the one it was placed on.
+//
+// So: if the stored levels are nowhere near this symbol's price, they came
+// from a different instrument. Ignore them and put the lines at the current
+// price instead, where they are visible and can be dragged into place. The
+// stored numbers are untouched -- switch back and they are still there.
+// ---------------------------------------------------------------------------
+fitsSymbol(float px) =>
+    not na(px) and px > 0 and px < close * 2.0 and px > close * 0.5
+
+levelsFit = fitsSymbol(manEntry) and fitsSymbol(manStop) and fitsSymbol(manTarget)
+
+atrNow  = na(atrVal) or atrVal <= 0 ? close * 0.001 : atrVal
+fallStop = isLong ? close - stopBufferATR * atrNow : close + stopBufferATR * atrNow
+fallRisk = math.abs(close - fallStop)
+fallTgt  = isLong ? close + rr * fallRisk : close - rr * fallRisk
+
+manualEntry = levelsFit ? manEntry  : close
+manualStop  = levelsFit ? manStop   : fallStop
+manualTgt   = levelsFit ? manTarget : fallTgt
+
+rawEntry = mode == "manual" ? manualEntry : autoEntry
+rawStop  = mode == "manual" ? manualStop  : autoStop
+rawTgt   = mode == "manual" ? manualTgt   : autoTgt
+
+// "Clear levels" blanks everything. Publishing nothing is the safe state:
+// the extension reads no values, so an old setup cannot be sent by mistake
+// after you have moved on from it.
+entry  = clearAll ? na : rawEntry
+stopPx = clearAll ? na : rawStop
+tgtPx  = clearAll ? na : rawTgt
+
+// ============================================================================
+// THE INTERFACE -- LOAD-BEARING, DO NOT RENAME.
+//
+// TradingView renders each plotted value into the legend tagged with its plot
+// title:  <div data-test-id-value-title="Entry" ...>
+// The browser extension addresses the values by exactly those names, so these
+// five titles are an API between this file and bridge/extension/popup.js.
+// Renaming any of them silently breaks the "Read levels from chart" button.
+//
+// Four earlier versions of that reader tried to parse the legend's TEXT
+// instead and all failed, because TradingView concatenates the values with no
+// separators ("1.967061.966031.96812"). Read the labelled elements, never the
+// text.
+// ============================================================================
+plot(not na(entry)  and entry  != 0 ? entry  : na, title="Entry",  color=color.new(color.white, 0),  linewidth=2, style=plot.style_linebr)
+plot(not na(stopPx) and stopPx != 0 ? stopPx : na, title="Stop",   color=color.new(slColor, 0),      linewidth=1, style=plot.style_linebr)
+plot(not na(tgtPx)  and tgtPx  != 0 ? tgtPx  : na, title="Target", color=color.new(tpColor, 0),      linewidth=1, style=plot.style_linebr)
+
+// Direction, so the extension can tell a long from a short without guessing
+// from the geometry. 1 = long, -1 = short.
+plot(not na(entry) and entry != 0 ? (isLong ? 1 : -1) : na, title="Long", display=display.status_line)
+
+// ---- risk:reward readout ---------------------------------------------------
+riskAmt   = not na(entry) and not na(stopPx) and entry != 0 and stopPx != 0 ? math.abs(entry - stopPx) : na
+rewardAmt = not na(entry) and not na(tgtPx) and entry != 0 and tgtPx  != 0 ? math.abs(tgtPx - entry)  : na
+rrValue   = not na(riskAmt) and riskAmt > 0 ? rewardAmt / riskAmt : na
+plot(rrValue, title="RR", display=display.status_line)
+
+// ---- drawing ---------------------------------------------------------------
+var box tpB = na
+var box slB = na
+
+if showBox and not na(entry) and not na(stopPx) and not na(tgtPx) and entry != 0 and stopPx != 0 and tgtPx != 0
+    if not na(tpB)
+        box.delete(tpB)
+        box.delete(slB)
+    tpB := box.new(bar_index - 30, tgtPx, bar_index + 10, entry,
+         bgcolor=color.new(tpColor, boxTransp), border_color=color.new(tpColor, 45))
+    slB := box.new(bar_index - 30, entry, bar_index + 10, stopPx,
+         bgcolor=color.new(slColor, boxTransp), border_color=color.new(slColor, 45))
+
+// A wrong-side stop is the most expensive typo available here, so it is shown
+// on the chart rather than left to be discovered in a rejection log.
+badStop = not na(entry) and not na(stopPx) and entry != 0 and stopPx != 0 and
+     ((isLong and stopPx >= entry) or (not isLong and stopPx <= entry))
+bgcolor(badStop ? color.new(color.red, 85) : na, title="Stop on the wrong side")
+
+// A snapped level must never be mistaken for one you placed deliberately.
+var label fitLbl = na
+if barstate.islast
+    if not na(fitLbl)
+        label.delete(fitLbl)
+    if mode == "manual" and not levelsFit and not clearAll
+        fitLbl := label.new(bar_index, high,
+             "Levels were from another symbol — snapped to price. Drag to place.",
+             style=label.style_label_down, color=color.new(color.orange, 20),
+             textcolor=color.white, size=size.small)

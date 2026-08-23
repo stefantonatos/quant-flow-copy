@@ -16,8 +16,8 @@ import math
 
 from engine import (
     Strategy, Bar, sma, ema, rsi, atr, bollinger, highest, lowest,
-    macd, stochastic, vwap_rolling, supertrend, roc,
-    wavetrend, cci, adx, normalize01,
+    macd, stochastic, vwap_rolling, vwap_session, supertrend, roc,
+    wavetrend, cci, adx, normalize01, pivots, confirmed_pivots, fvgs,
 )
 from typing import List
 
@@ -264,6 +264,199 @@ class VWAPReversion(Strategy):
                 f"vwap = math.sum(src*volume, {n}) / math.sum(volume, {n})\n"
                 f"longCond = close > vwap\n"
                 f"plot(vwap, color=color.blue)\n")
+
+
+class VWAPATRFade(Strategy):
+    name = "VWAP ATR Fade"
+    description = ("Long only. Enter when close is entry_atr x ATR below the "
+                   "session VWAP, exit when close reaches VWAP. No shorts, "
+                   "no stop-loss -- exactly as specified; see the honest note "
+                   "on that in CLAUDE.md before trading it. Needs intraday "
+                   "bars: on daily data each session is one bar, so VWAP "
+                   "collapses to that bar's own typical price and the entry "
+                   "condition almost never fires.")
+
+    def prepare(self):
+        p = self.params
+        self.vwap = vwap_session(self.bars, p.get("anchor_hour", 0),
+                                 p.get("anchor_tz"))
+        self.atrv = atr(self.bars, p.get("atr_n", 14))
+        self.entry_mult = p.get("entry_atr", 2.0)
+
+        # --- the two optional risk controls, both OFF by default ---------
+        # stop_atr: exit when close falls stop_atr x ATR below the entry.
+        #   The 2020-2026 run without one lost 25% in 2022 alone and drew
+        #   down 28%, because "hold until price returns to VWAP" has no
+        #   answer for a trend that simply never returns.
+        # trend_n: refuse to buy while close is under an SMA of this length,
+        #   i.e. stand aside in a sustained downtrend rather than buying
+        #   every dip in it.
+        self.stop_atr = p.get("stop_atr", 0.0)
+        self.trend_n = int(p.get("trend_n", 0))
+        self.trend = sma(self.closes, self.trend_n) if self.trend_n else None
+
+        self.holding = False
+        self.stop_px = float("nan")
+
+    def decide(self, i):
+        v, a = self.vwap[i], self.atrv[i]
+        if v != v or a != a:  # nan during warmup
+            return "LONG" if self.holding else "FLAT"
+        c = self.closes[i]
+
+        if not self.holding:
+            if c <= v - self.entry_mult * a:
+                ok = True
+                if self.trend is not None:
+                    t = self.trend[i]
+                    ok = (t == t) and c > t
+                if ok:
+                    self.holding = True
+                    # Stop is fixed at entry -- it does not trail. A trailing
+                    # stop is a different strategy, not a safety net.
+                    self.stop_px = (c - self.stop_atr * a
+                                    if self.stop_atr > 0 else float("nan"))
+        else:
+            # Target first: on a bar that both recovers to VWAP and breaches
+            # the stop, treating it as a win would be the optimistic
+            # same-bar resolution this repo refuses everywhere else. But
+            # here the stop is BELOW entry and VWAP is ABOVE it, so a single
+            # close cannot satisfy both -- no ambiguity to resolve.
+            if c >= v:
+                self.holding = False
+            elif self.stop_px == self.stop_px and c <= self.stop_px:
+                self.holding = False
+        return "LONG" if self.holding else "FLAT"
+
+    def to_pine(self):
+        p = self.params
+        mult = p.get("entry_atr", 2.0)
+        atr_n = p.get("atr_n", 14)
+        return (f"//@version=6\n"
+                f"indicator(\"VWAP ATR Fade (free)\", overlay=true)\n"
+                f"v = ta.vwap(hlc3)\n"
+                f"a = ta.atr({atr_n})\n"
+                f"longCond = close <= v - {mult} * a\n"
+                f"exitCond = close >= v\n"
+                f"var bool holding = false\n"
+                f"if longCond\n"
+                f"    holding := true\n"
+                f"if exitCond\n"
+                f"    holding := false\n"
+                f"plot(v, color=color.blue, title=\"VWAP\")\n"
+                f"plotshape(longCond and not holding[1], style=shape.triangleup, "
+                f"color=color.green, location=location.belowbar, size=size.tiny)\n"
+                f"plotshape(exitCond and holding[1], style=shape.circledot, "
+                f"color=color.red, size=size.tiny)\n")
+
+
+class NYOpenEMA(Strategy):
+    name = "NY Open EMA Break"
+    description = ("At the New York cash open, take the first 5-minute candle: "
+                   "close above the 12 EMA goes long, below goes short. Exit on "
+                   "a trailing stop. One trade per day, flat by session close. "
+                   "Needs 5-minute bars -- on anything coarser 'the first "
+                   "5-minute candle' does not exist.")
+
+    # ---- decisions made where the description was silent -----------------
+    # These are choices, not rules handed down, and each one moves the result:
+    #   * The EMA runs on the SAME 5-minute series and is seeded from the
+    #     overnight session, so at 09:30 it already carries 12 real bars.
+    #     A 12 EMA computed from only the day's own bars would be undefined
+    #     on the very bar the decision is made.
+    #   * Entry is at the CLOSE of that first candle -- the bar whose close
+    #     generates the signal. Entering at its open would be lookahead.
+    #   * The trail is measured from the best CLOSE since entry, at a fixed
+    #     multiple of the ATR *as at entry*. Using live ATR makes the stop
+    #     breathe with volatility, which is defensible but is a different
+    #     strategy; this keeps the risk unit fixed the way a trader placing
+    #     one order would.
+    #   * Flat at session end. Nothing in the description implies carrying
+    #     an intraday momentum trade overnight through the gap.
+    def prepare(self):
+        import zoneinfo
+        p = self.params
+        bars = self.bars
+        self.ema12 = ema(self.closes, int(p.get("ema_n", 12)))
+        self.atrv = atr(bars, int(p.get("atr_n", 14)))
+        self.trail_atr = float(p.get("trail_atr", 2.0))
+        self.allow_short = bool(p.get("allow_short", True))
+
+        tz = zoneinfo.ZoneInfo(p.get("session_tz", "America/New_York"))
+        open_h = int(p.get("open_hour", 9))
+        open_m = int(p.get("open_min", 30))
+        close_h = int(p.get("close_hour", 16))
+
+        # Mark the first bar at or after the cash open on each local day, and
+        # the bars that are past the close. Doing this in exchange-local time
+        # is what makes it survive DST -- 09:30 New York is 13:30 UTC in
+        # summer and 14:30 in winter, so a fixed UTC hour is wrong half the
+        # year (the same trap already documented for vwap_session).
+        self.is_open_bar = [False] * len(bars)
+        self.past_close = [False] * len(bars)
+        seen = set()
+        for i, b in enumerate(bars):
+            lt = datetime.datetime.fromtimestamp(b.t, tz)
+            mins = lt.hour * 60 + lt.minute
+            if mins >= close_h * 60:
+                self.past_close[i] = True
+            if mins >= open_h * 60 + open_m and lt.date() not in seen:
+                seen.add(lt.date())
+                self.is_open_bar[i] = True
+
+        self.pos = "FLAT"
+        self.best = float("nan")     # best close since entry
+        self.entry_atr = float("nan")
+
+    def decide(self, i):
+        c = self.closes[i]
+
+        if self.pos != "FLAT":
+            # Session end closes the trade regardless of the trail.
+            if self.past_close[i]:
+                self.pos = "FLAT"
+                return "FLAT"
+            if self.pos == "LONG":
+                self.best = c if self.best != self.best else max(self.best, c)
+                if c <= self.best - self.trail_atr * self.entry_atr:
+                    self.pos = "FLAT"
+            else:
+                self.best = c if self.best != self.best else min(self.best, c)
+                if c >= self.best + self.trail_atr * self.entry_atr:
+                    self.pos = "FLAT"
+            return self.pos
+
+        # Only the opening bar can start a trade -- one per day.
+        if not self.is_open_bar[i]:
+            return "FLAT"
+        e, a = self.ema12[i], self.atrv[i]
+        if e != e or a != a or a <= 0:
+            return "FLAT"
+        if c > e:
+            self.pos = "LONG"
+        elif c < e and self.allow_short:
+            self.pos = "SHORT"
+        else:
+            return "FLAT"
+        self.best = c
+        self.entry_atr = a
+        return self.pos
+
+    def to_pine(self):
+        p = self.params
+        return (f"//@version=6\n"
+                f"strategy(\"NY Open EMA Break\", overlay=true)\n"
+                f"// Run this on a 5-minute chart.\n"
+                f"e = ta.ema(close, {int(p.get('ema_n', 12))})\n"
+                f"a = ta.atr({int(p.get('atr_n', 14))})\n"
+                f"isOpen = ta.change(time('D')) != 0\n"
+                f"// entry on the first bar of the session, direction from the EMA\n"
+                f"if isOpen and close > e\n"
+                f"    strategy.entry(\"L\", strategy.long)\n"
+                f"if isOpen and close < e\n"
+                f"    strategy.entry(\"S\", strategy.short)\n"
+                f"strategy.exit(\"xL\", \"L\", trail_points=a * {p.get('trail_atr', 2.0)} / syminfo.mintick)\n"
+                f"strategy.exit(\"xS\", \"S\", trail_points=a * {p.get('trail_atr', 2.0)} / syminfo.mintick)\n")
 
 
 class SupertrendFollow(Strategy):
@@ -555,11 +748,26 @@ class LorentzianClassification(Strategy):
         def lorentzian_dist(a, b):
             return sum(math.log1p(abs(x - y)) for x, y in zip(a, b))
 
-        # Training labels: sign of the trailing 4-bar move, exactly as the
-        # indicator computes it live (see lorentzian_classification.pine:335)
+        # Training labels: the trailing 4-bar move, labelled AGAINST its
+        # direction, exactly as the indicator does (lorentzian_classification.pine:335):
+        #
+        #   y_train_series = src[4] < src[0] ? direction.short
+        #                  : src[4] > src[0] ? direction.long
+        #                  : direction.neutral
+        #   with direction.long = 1, direction.short = -1   (.pine:291-296)
+        #
+        # In Pine `src[4]` is 4 bars AGO and `src[0]` is NOW, so `src[4] < src[0]`
+        # means price ROSE -- and upstream labels that SHORT (-1). A 4-bar FALL is
+        # labelled LONG (+1). That looks backwards, and it is deliberate on
+        # upstream's part: the model fades the trailing move rather than
+        # extrapolating it. Do not "fix" the sign to read naturally.
+        #
+        # This previously read `1 if closes[i-4] < closes[i] else -1`, which
+        # inverted every label and made this port trade the exact mirror image of
+        # the indicator it replicates. See test_lorentzian_labels_match_pine.
         labels = [0] * n
         for i in range(4, n):
-            labels[i] = 1 if closes[i - 4] < closes[i] else (-1 if closes[i - 4] > closes[i] else 0)
+            labels[i] = -1 if closes[i - 4] < closes[i] else (1 if closes[i - 4] > closes[i] else 0)
 
         max_bars_back_index = n - 1 - max_bars_back if n - 1 >= max_bars_back else 0
         start_index = max_bars_back_index  # includeFullHistory=False (indicator default)
@@ -588,6 +796,10 @@ class LorentzianClassification(Strategy):
                         distances.pop(0)
                         preds.pop(0)
             predictions_sum[j] = sum(preds)
+
+        # Exposed so the Pine-parity test can assert the label signs directly
+        # rather than inferring them from downstream behaviour.
+        self.labels = labels
 
         # Filters: volatility (short ATR > long ATR) + regime (Kalman-like slope filter)
         atr_short, atr_long = atr(bars, 1), atr(bars, 10)
@@ -686,12 +898,744 @@ class LorentzianClassification(Strategy):
             positions[i] = pos
         self.positions = positions
 
+        # Exposed for brackets.py: engine.run() only sees the collapsed
+        # posture above, but a bracket backtest needs the actual entry
+        # events -- posture alone can't tell a fresh signal from a bar where
+        # the prior position simply held.
+        self.start_long = start_long
+        self.start_short = start_short
+
     def decide(self, i):
         return self.positions[i]
 
     def to_pine(self):
         return ("// Full Pine Script v6 source: see lorentzian_classification.pine\n"
                 "// in the repo root (jdehorty's public indicator, MPL 2.0).\n")
+
+
+class SupplyDemandStructure(Strategy):
+    """TradingLab's "The Only Trading Strategy You'll Ever Need" (2024-11-04).
+
+    Three steps, per the video:
+      1. Market structure -- uptrend = higher highs AND higher lows; downtrend
+         = lower lows AND lower highs. Trade only with the trend.
+      2. Supply/demand zone -- in an uptrend mark the demand area where price
+         consolidated before shooting up, and wait for price to return to it.
+         Mirrored for supply in downtrends.
+      3. Risk:reward -- take the trade only if R:R >= 2.5, else skip it. The
+         video credits this single filter with most of the strategy's edge.
+
+    CAVEAT ON FIDELITY. The video is not reachable from this container
+    (youtube.com and every transcript mirror are egress-blocked), so these
+    rules were reconstructed from search-index summaries, not the transcript.
+    More importantly, "where price consolidated before shooting up" is a
+    human eyeballing a chart -- it is not a rule. The impulse/base detection
+    below is *a* defensible mechanization, not *the* strategy, and results
+    will move with `impulse_atr` and `base_max_bars`. Treat any backtest of
+    this as a test of this interpretation.
+
+    Exposes start_long/start_short plus stops/targets so brackets.py can
+    execute the real structural levels rather than re-deriving from ATR.
+    """
+
+    name = "Supply/Demand + Structure"
+    description = ("Price action: trade with market structure (HH/HL or LL/LH) off "
+                    "demand/supply zones, filtered to setups offering at least "
+                    "2.5:1 reward-to-risk. Mechanization of TradingLab's video "
+                    "strategy -- zone-drawing is discretionary, see class docstring.")
+
+    def prepare(self):
+        p = self.params
+        bars, n = self.bars, len(self.bars)
+        left = right = p.get("pivot_lookback", 5)
+        impulse_atr = p.get("impulse_atr", 2.0)
+        impulse_max_bars = p.get("impulse_max_bars", 5)
+        base_max_bars = p.get("base_max_bars", 3)
+        zone_max_age = p.get("zone_max_age", 200)
+        sl_buffer_atr = p.get("sl_buffer_atr", 0.25)
+        self.min_rr = p.get("min_rr", 2.5)
+
+        a = atr(bars, p.get("atr_n", 14))
+        ph_events, pl_events = confirmed_pivots(bars, left, right)
+
+        start_long = [False] * n
+        start_short = [False] * n
+        stops: List[float] = [float("nan")] * n
+        targets: List[float] = [float("nan")] * n
+
+        # Pivot events keyed by the bar they become knowable on, so nothing
+        # below can consult a swing before its right-hand bars have closed.
+        ph_by_confirm = {}
+        pl_by_confirm = {}
+        for c, idx, px in ph_events:
+            ph_by_confirm.setdefault(c, []).append((idx, px))
+        for c, idx, px in pl_events:
+            pl_by_confirm.setdefault(c, []).append((idx, px))
+
+        swing_highs: List[tuple] = []   # (bar_index, price), confirmed only
+        swing_lows: List[tuple] = []
+        zones: List[dict] = []          # active demand/supply zones
+
+        for i in range(n):
+            for idx, px in ph_by_confirm.get(i, []):
+                swing_highs.append((idx, px))
+            for idx, px in pl_by_confirm.get(i, []):
+                swing_lows.append((idx, px))
+
+            # --- Step 1: market structure ---------------------------------
+            trend = 0
+            if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+                hh = swing_highs[-1][1] > swing_highs[-2][1]
+                hl = swing_lows[-1][1] > swing_lows[-2][1]
+                ll = swing_lows[-1][1] < swing_lows[-2][1]
+                lh = swing_highs[-1][1] < swing_highs[-2][1]
+                if hh and hl:
+                    trend = 1
+                elif ll and lh:
+                    trend = -1
+
+            # --- Step 2: find new zones off completed impulse legs --------
+            # An impulse is a fast directional move; the zone is the small
+            # base immediately preceding it. Detected on bar i looking only
+            # backwards, so it is causal.
+            av = a[i]
+            if av == av and av > 0 and i >= impulse_max_bars + base_max_bars:
+                for span in range(1, impulse_max_bars + 1):
+                    lo_i, hi_i = i - span, i
+                    move = bars[hi_i].c - bars[lo_i].o
+                    if abs(move) < impulse_atr * av:
+                        continue
+                    bstart = max(0, lo_i - base_max_bars)
+                    bbars = bars[bstart:lo_i]
+                    if not bbars:
+                        continue
+                    if move > 0:
+                        zones.append({"kind": "demand", "top": max(b.h for b in bbars),
+                                      "bot": min(b.l for b in bbars), "born": i})
+                    else:
+                        zones.append({"kind": "supply", "top": max(b.h for b in bbars),
+                                      "bot": min(b.l for b in bbars), "born": i})
+                    break
+
+            # Expire zones: aged out, or price closed clean through them.
+            zones = [z for z in zones
+                     if i - z["born"] <= zone_max_age
+                     and not (z["kind"] == "demand" and bars[i].c < z["bot"])
+                     and not (z["kind"] == "supply" and bars[i].c > z["top"])]
+
+            # --- Entry: price returns into a with-trend zone ---------------
+            if trend == 0 or av != av or av <= 0:
+                continue
+            want = "demand" if trend == 1 else "supply"
+            for z in zones:
+                if z["kind"] != want or z["born"] >= i:
+                    continue
+                touched = (bars[i].l <= z["top"] if trend == 1
+                           else bars[i].h >= z["bot"])
+                if not touched:
+                    continue
+
+                entry = bars[i].c
+                if trend == 1:
+                    stop = z["bot"] - sl_buffer_atr * av
+                    target = swing_highs[-1][1] if swing_highs else float("nan")
+                    risk, reward = entry - stop, (target - entry)
+                else:
+                    stop = z["top"] + sl_buffer_atr * av
+                    target = swing_lows[-1][1] if swing_lows else float("nan")
+                    risk, reward = stop - entry, (entry - target)
+
+                if risk <= 0 or reward != reward or reward <= 0:
+                    continue
+                # --- Step 3: the R:R filter -- the whole point of step 3 ---
+                if reward / risk < self.min_rr:
+                    continue
+
+                if trend == 1:
+                    start_long[i] = True
+                else:
+                    start_short[i] = True
+                stops[i], targets[i] = stop, target
+                zones.remove(z)
+                break
+
+        self.start_long = start_long
+        self.start_short = start_short
+        self.stops = stops
+        self.targets = targets
+
+        # Collapse into a posture series so engine.run() can consume it too.
+        # Without brackets there is no stop/target, so this holds until the
+        # opposite signal -- a strictly worse execution model than
+        # `run.py --bracket`, which is the intended way to run this.
+        positions = ["FLAT"] * n
+        pos = "FLAT"
+        for i in range(n):
+            if start_long[i]:
+                pos = "LONG"
+            elif start_short[i]:
+                pos = "SHORT"
+            positions[i] = pos
+        self.positions = positions
+
+    def decide(self, i):
+        return self.positions[i]
+
+    def to_pine(self):
+        p = self.params
+        return (f"//@version=6\n"
+                f"indicator(\"Supply/Demand + Structure (free)\", overlay=true)\n"
+                f"lb = {p.get('pivot_lookback', 5)}\n"
+                f"ph = ta.pivothigh(high, lb, lb)\n"
+                f"pl = ta.pivotlow(low, lb, lb)\n"
+                f"// Structure: uptrend = HH and HL; zones = base before an impulse leg;\n"
+                f"// entry on return to zone, stop beyond it, target = last swing,\n"
+                f"// taken only when reward/risk >= {p.get('min_rr', 2.5)}.\n"
+                f"plotshape(not na(ph), style=shape.triangledown, location=location.abovebar)\n"
+                f"plotshape(not na(pl), style=shape.triangleup, location=location.belowbar)\n")
+
+
+class NoWickRetrace(Strategy):
+    """@bardfx's "No Wick" strategy.
+
+    Three rules, as he describes them:
+      1. Mark a wickless candle WITH THE TREND -- a bullish candle with no
+         bottom wick in an uptrend, a bearish candle with no top wick in a
+         downtrend.
+      2. Wait for price to retrace back to that candle.
+      3. Enter with the trend, stop beyond structure, target roughly 1:1.
+
+    "Wickless" is exact equality, not a judgement call: the indicator he uses
+    (xGhozt Wickless Candles) marks a bar where low == min(open, close) or
+    high == max(open, close). `wick_tol` (absolute price) defaults to 0.0 to
+    match that exactly.
+
+    TIMEFRAME/INSTRUMENT WARNING. Stefan is running this on 15-minute FOREX.
+    Exact equality is a much stronger condition there than on a tick-sized
+    future: EURUSD quotes to 5 decimals, so a 15m bar closing with a
+    *precisely* zero wick is rare, and `wick_tol=0.0` may yield almost no
+    setups. `wick_tol_frac` is the knob for that -- a wick counted as absent
+    when it is <= that fraction of the bar's own range, which scales across
+    instruments the way an absolute price tolerance cannot. It defaults to
+    0.0 (strict) so nothing is loosened silently; raise it and re-measure,
+    because loosening the definition is loosening the strategy, and the
+    signal count will move a long way with it.
+
+    The premise is at least internally coherent -- the wickless indicator's
+    own author argues a missing wick tends to get filled later, and "price
+    retraces to the candle" IS that wick forming. But note what follows:
+    the entry level is one price has already demonstrated it returns to, so a
+    high fill rate is built into the setup and says nothing about what happens
+    after the fill.
+
+    Two things in the description are not rules and had to be decided:
+      - "the trend" -- built both ways, `trend_mode` selects swing structure
+        (HH/HL, shared with SupplyDemandStructure) or a close-vs-EMA test.
+      - "some breathing room" below the candle -- `stop_buffer_atr`.
+
+    Be clear about what that second one does, because it is not a detail.
+    Entry is AT the flat edge, which for a bullish candle is its low. So a
+    stop "below the candle" is a stop below the entry by the buffer and
+    nothing else: the buffer IS the risk, and since the target is rr x risk,
+    it sets the whole trade's geometry. Too tight and the entry bar's own
+    range straddles both the stop and the target, which shows up honestly
+    here as a 100% ambiguous bracket -- the pessimistic and optimistic
+    policies then disagree by 2R on every single trade, and neither number
+    means anything. The 0.5 ATR default is a sane starting point, not a
+    finding; it is in the opt.py grid because it has to be measured.
+
+    Exposes start_long/start_short/entries/stops/targets. Entry is a RESTING
+    LIMIT at the candle's flat edge, not the signal bar's close, so this must
+    be run through `run.py --bracket` to mean anything.
+    """
+
+    name = "No Wick Retrace"
+    description = ("Mark a with-trend candle that has no wick on its trend side, "
+                    "wait for price to retrace to that flat edge, enter there with "
+                    "a stop beyond it and a 1:1 target. Mechanization of @bardfx's "
+                    "'no wick' setup -- see class docstring on what was decided.")
+
+    def prepare(self):
+        p = self.params
+        bars, n = self.bars, len(self.bars)
+        tol = p.get("wick_tol", 0.0)
+        tol_frac = p.get("wick_tol_frac", 0.0)
+        trend_mode = p.get("trend_mode", "structure")
+        ema_len = p.get("ema_len", 50)
+        lb = p.get("pivot_lookback", 5)
+        stop_mode = p.get("stop_mode", "candle")
+        buf = p.get("stop_buffer_atr", 0.50)
+        rr = p.get("rr", 1.0)
+        zone_max_age = p.get("zone_max_age", 100)
+
+        a = atr(bars, p.get("atr_n", 14))
+        e = ema(self.closes, ema_len)
+        ph_events, pl_events = confirmed_pivots(bars, lb, lb)
+
+        start_long = [False] * n
+        start_short = [False] * n
+        entries: List[float] = [float("nan")] * n
+        stops: List[float] = [float("nan")] * n
+        targets: List[float] = [float("nan")] * n
+
+        ph_by_confirm, pl_by_confirm = {}, {}
+        for c, idx, px in ph_events:
+            ph_by_confirm.setdefault(c, []).append((idx, px))
+        for c, idx, px in pl_events:
+            pl_by_confirm.setdefault(c, []).append((idx, px))
+
+        swing_highs: List[tuple] = []
+        swing_lows: List[tuple] = []
+        marks: List[dict] = []   # unfilled wickless levels waiting for a retrace
+        trends = [0] * n
+
+        # Detection is a property of the bar alone, so precompute it. A
+        # bullish candle with a flat bottom (low == open) is the long setup;
+        # a bearish candle with a flat top (high == open) is the short one.
+        # A fully wickless bullish candle has a flat bottom too, so it counts.
+        is_bull_mark = [False] * n
+        is_bear_mark = [False] * n
+        for i, b in enumerate(bars):
+            # Effective tolerance: the looser of the absolute and the
+            # range-relative one, so either knob alone does the job.
+            lim = max(tol, tol_frac * (b.h - b.l))
+            if b.c > b.o and b.o - b.l <= lim:
+                is_bull_mark[i] = True
+            elif b.c < b.o and b.h - b.o <= lim:
+                is_bear_mark[i] = True
+        # Exposed so a test can separate "the candle wasn't detected" from
+        # "the trend gate rejected it" -- two very different failures.
+        self.debug_bull_marks = is_bull_mark
+        self.debug_bear_marks = is_bear_mark
+
+        for i in range(n):
+            for idx, px in ph_by_confirm.get(i, []):
+                swing_highs.append((idx, px))
+            for idx, px in pl_by_confirm.get(i, []):
+                swing_lows.append((idx, px))
+
+            # --- Trend ------------------------------------------------------
+            trend = 0
+            ema_trend = 0
+            ev = e[i]
+            if ev == ev:
+                ema_trend = 1 if bars[i].c > ev else (-1 if bars[i].c < ev else 0)
+
+            struct_trend = 0
+            if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+                hh = swing_highs[-1][1] > swing_highs[-2][1]
+                hl = swing_lows[-1][1] > swing_lows[-2][1]
+                ll = swing_lows[-1][1] < swing_lows[-2][1]
+                lh = swing_highs[-1][1] < swing_highs[-2][1]
+                if hh and hl:
+                    struct_trend = 1
+                elif ll and lh:
+                    struct_trend = -1
+
+            if trend_mode == "ema":
+                trend = ema_trend
+            elif trend_mode == "both":
+                # Structure is a LOCAL read -- on 15m with a 5-bar pivot it
+                # sees about an hour, so an ordinary pullback inside a strong
+                # uptrend prints a lower low and lower high and flips bearish.
+                # That is how "structure" ends up shorting a market that is
+                # plainly rising. Requiring the EMA to agree suppresses those
+                # rather than trading them, at the cost of far fewer setups.
+                trend = struct_trend if struct_trend == ema_trend else 0
+            else:
+                trend = struct_trend
+            trends[i] = trend
+
+            av = a[i]
+
+            # --- Step 2: has price retraced into an existing mark? ----------
+            # Checked BEFORE this bar can create a new mark, so a candle can
+            # never trigger its own level on the bar that printed it.
+            if trend != 0 and av == av and av > 0:
+                for m in marks:
+                    if m["dir"] != trend:
+                        continue
+                    # The retrace must reach the flat edge itself -- the low
+                    # for a bullish candle, the high for a bearish one. Wicking
+                    # into the body is not a fill; that level is the whole point.
+                    level = m["level"]
+                    touched = (bars[i].l <= level if trend == 1
+                               else bars[i].h >= level)
+                    if not touched:
+                        continue
+
+                    entry = level
+                    if trend == 1:
+                        base = (m["level"] if stop_mode == "candle"
+                                else (swing_lows[-1][1] if swing_lows else m["level"]))
+                        stop = min(base, m["level"]) - buf * av
+                        risk = entry - stop
+                        target = entry + rr * risk
+                    else:
+                        base = (m["level"] if stop_mode == "candle"
+                                else (swing_highs[-1][1] if swing_highs else m["level"]))
+                        stop = max(base, m["level"]) + buf * av
+                        risk = stop - entry
+                        target = entry - rr * risk
+                    if risk <= 0:
+                        continue
+
+                    if trend == 1:
+                        start_long[i] = True
+                    else:
+                        start_short[i] = True
+                    entries[i], stops[i], targets[i] = entry, stop, target
+                    marks.remove(m)
+                    break
+
+            # --- Step 1: mark a new with-trend wickless candle --------------
+            if trend == 1 and is_bull_mark[i]:
+                marks.append({"dir": 1, "level": bars[i].l, "born": i})
+            elif trend == -1 and is_bear_mark[i]:
+                marks.append({"dir": -1, "level": bars[i].h, "born": i})
+
+            # Expire: aged out, or price closed clean through the level, which
+            # means the "unfilled wick" thesis for that candle is dead.
+            marks = [m for m in marks
+                     if i - m["born"] <= zone_max_age
+                     and not (m["dir"] == 1 and bars[i].c < m["level"])
+                     and not (m["dir"] == -1 and bars[i].c > m["level"])]
+
+        self.start_long = start_long
+        self.start_short = start_short
+        self.entries = entries
+        self.stops = stops
+        self.targets = targets
+        self.allow_entry_bar_fill = True
+        # bardfx describes ONE target at roughly 1:1, not a scale-out. Leaving
+        # the default half-off at TP1 in place would score a win as 0.75R
+        # against a 1R loss and quietly move breakeven to 57%.
+        self.partial_at_tp1 = False
+        self.trends = trends
+
+        # Posture series so engine.run() can consume it too. Without brackets
+        # there is no stop or 1:1 target, so this holds until the opposite
+        # signal -- a materially different (and worse) strategy than the one
+        # described. `run.py --bracket` is the intended path.
+        positions = ["FLAT"] * n
+        pos = "FLAT"
+        for i in range(n):
+            if start_long[i]:
+                pos = "LONG"
+            elif start_short[i]:
+                pos = "SHORT"
+            positions[i] = pos
+        self.positions = positions
+
+    def decide(self, i):
+        return self.positions[i]
+
+    def to_pine(self):
+        return ("// Full Pine Script v6 source: see pine/no_wick.pine in this repo.\n"
+                "// It is a strategy(), not an indicator() -- paste it into\n"
+                "// TradingView and the Strategy Tester backtests it on real chart\n"
+                "// data, which is the point: this container has no market-data\n"
+                "// access, so TradingView is where this setup actually gets\n"
+                "// measured. Inputs and defaults mirror this class one-for-one.\n")
+
+
+class AsiaSweepCSD(Strategy):
+    """Asia liquidity sweep + change in state of delivery, targeting the
+    opposite side of the Asian range.
+
+    From a video transcript Stefan sent. The rules as stated:
+      1. Mark the Asian session high and low (he uses Leviathan's Market
+         Sessions indicator; a screenshot confirms it is set to UTC).
+      2. Wait for price to sweep one side of that range.
+      3. Drop to the 5-minute chart and wait for a "change in state of
+         delivery" (CSD).
+      4. Enter on the close of the CSD candle.
+      5. Target the OPPOSITE Asia level. He calls it a 3RR trade.
+
+    Note (5) carefully: the target is a fixed price, not an R multiple. So
+    the reward:risk of any given setup is whatever the geometry happens to
+    give -- "3RR" describes the example on screen, it is not a rule. Some
+    setups will offer far less. `min_rr` exists to skip those, and it is the
+    single input most likely to change the results, so it is off (0.0) by
+    default rather than quietly filtering trades nobody asked to filter.
+
+    THREE THINGS THE TRANSCRIPT DOES NOT DEFINE, decided here and exposed as
+    parameters rather than baked in:
+
+    - `csd_mode` -- what a "change in state of delivery" actually is. He was
+      asked and said he didn't know. Default `"candle"` is the standard ICT
+      reading: the first bar closing back above the high of the most recent
+      down-close bar (mirrored for shorts). `"swing"` is looser -- a close
+      beyond the highest high of the last `swing_lookback` bars, i.e. a mini
+      break of structure. `"ifvg"` is the inverse-fair-value-gap reading:
+      a bearish gap that price closes back above has stopped being a
+      sell-side imbalance and started acting as support, which is the same
+      claim "change in state of delivery" makes -- an inversion IS a CSD, so
+      this is a third reading of one idea rather than a separate strategy.
+      `ifvg_entry` then chooses between entering on the inversion bar's
+      close (default) and waiting for price to retest the flipped zone;
+      those are materially different trades, so both are available.
+    - `one_per_day` -- default True, first valid setup only.
+    - Session hours -- default 00:00-09:00 UTC. CONFIRMED from a screenshot of
+      Stefan's Leviathan Market Sessions panel: his Asia block is Tokyo,
+      00:00-09:00. An earlier default of 00:00-08:00 was wrong by an hour.
+
+    Stop placement was specified: below the sweep extreme (the wick that took
+    the level), plus an ATR buffer.
+
+    This is the third video strategy in this repo and the same caveat applies
+    to all of them: it is *a* mechanization of a discretionary description,
+    not *the* strategy. Say so when reporting numbers.
+
+    NEEDS INTRADAY BARS WITH UTC TIMESTAMPS. On the daily sample data every
+    bar lands in hour 0, so the session logic degenerates and it will produce
+    nothing. That is expected, not a bug.
+
+    Exposes start_long/start_short/stops/targets for brackets.py. Entry is
+    the CSD bar's close, so entry-bar fills stay off (the default).
+    """
+
+    name = "Asia Sweep + CSD"
+    description = ("Mark the Asian session range, wait for a sweep of one side, then "
+                    "enter on a change in the state of delivery back the other way, "
+                    "targeting the opposite side of the range. Needs intraday bars "
+                    "with UTC timestamps -- see the class docstring.")
+
+    def prepare(self):
+        p = self.params
+        bars, n = self.bars, len(self.bars)
+        asia_start = p.get("asia_start_hour", 0)
+        # 09:00, not 08:00 -- confirmed against Stefan's Leviathan Market
+        # Sessions settings, where the Asia block is Tokyo 00:00-09:00 UTC.
+        asia_end = p.get("asia_end_hour", 9)
+        trade_end = p.get("trade_end_hour", 21)
+        csd_mode = p.get("csd_mode", "candle")
+        swing_lookback = p.get("swing_lookback", 5)
+        ifvg_entry = p.get("ifvg_entry", "close")
+        fvg_min_size = p.get("fvg_min_size", 0.0)
+        stop_buffer_atr = p.get("stop_buffer_atr", 0.10)
+        one_per_day = p.get("one_per_day", True)
+        both_sides = p.get("both_sides", False)
+        min_rr = p.get("min_rr", 0.0)
+
+        a = atr(bars, p.get("atr_n", 14))
+
+        start_long = [False] * n
+        start_short = [False] * n
+        stops: List[float] = [float("nan")] * n
+        targets: List[float] = [float("nan")] * n
+        entries: List[float] = [float("nan")] * n
+
+        # Fair value gaps, keyed by the bar they become knowable on. All three
+        # bars of a gap are closed by then, so there is no confirmation lag to
+        # respect -- unlike pivots.
+        fvg_by_bar = {}
+        for g in fvgs(bars, fvg_min_size):
+            fvg_by_bar.setdefault(g["i"], []).append(g)
+
+        hours = [datetime.datetime.utcfromtimestamp(b.t).hour for b in bars]
+        days = [datetime.datetime.utcfromtimestamp(b.t).date() for b in bars]
+
+        i = 0
+        while i < n:
+            j = i
+            while j < n and days[j] == days[i]:
+                j += 1
+
+            asia_idx = [k for k in range(i, j) if asia_start <= hours[k] < asia_end]
+            if not asia_idx:
+                i = j
+                continue
+            asia_high = max(bars[k].h for k in asia_idx)
+            asia_low = min(bars[k].l for k in asia_idx)
+
+            # Per-day state. `swept_*_px` tracks the running extreme reached
+            # since the sweep, which is what the stop hangs off.
+            swept_low = swept_high = False
+            sweep_low_px = float("nan")
+            sweep_high_px = float("nan")
+            last_down_high = float("nan")   # high of the most recent down-close bar
+            last_up_low = float("nan")      # low of the most recent up-close bar
+            # iFVG state: the most recent gap of each polarity that has not yet
+            # been inverted, plus a pending retest zone once one has been.
+            last_bear_fvg = None
+            last_bull_fvg = None
+            pending_long_zone = None
+            pending_short_zone = None
+            taken_long = taken_short = False
+
+            for k in range(i, j):
+                b = bars[k]
+                if hours[k] < asia_end or hours[k] >= trade_end:
+                    # Still inside Asia, or past the cutoff. Keep the CSD
+                    # trackers warm but do not trade -- a gap laid down during
+                    # accumulation is exactly the one distribution inverts.
+                    if b.c < b.o:
+                        last_down_high = b.h
+                    elif b.c > b.o:
+                        last_up_low = b.l
+                    for g in fvg_by_bar.get(k, ()):
+                        if g["dir"] == -1:
+                            last_bear_fvg = dict(g)
+                        else:
+                            last_bull_fvg = dict(g)
+                    continue
+
+                # --- Step 2: the sweep ---------------------------------
+                if b.l < asia_low:
+                    swept_low = True
+                    sweep_low_px = b.l if sweep_low_px != sweep_low_px else min(sweep_low_px, b.l)
+                if b.h > asia_high:
+                    swept_high = True
+                    sweep_high_px = b.h if sweep_high_px != sweep_high_px else max(sweep_high_px, b.h)
+
+                av = a[k]
+
+                # --- Step 3/4: the CSD, entered on its close -----------
+                # Evaluated against the trackers as they stood BEFORE this
+                # bar, so the bar cannot satisfy its own condition.
+                if csd_mode == "swing":
+                    lo_k = max(i, k - swing_lookback)
+                    ref_high = max((bars[m].h for m in range(lo_k, k)), default=float("nan"))
+                    ref_low = min((bars[m].l for m in range(lo_k, k)), default=float("nan"))
+                elif csd_mode == "ifvg":
+                    # An inversion IS a change in the state of delivery: a
+                    # bearish gap that price closes back above has stopped
+                    # being a sell-side imbalance and started acting as
+                    # support. Reference is the top of the most recent
+                    # un-inverted bearish gap (mirrored for shorts).
+                    ref_high = last_bear_fvg["hi"] if last_bear_fvg else float("nan")
+                    ref_low = last_bull_fvg["lo"] if last_bull_fvg else float("nan")
+                else:
+                    ref_high = last_down_high
+                    ref_low = last_up_low
+
+                can_long = swept_low and not (taken_long or (one_per_day and taken_short))
+                can_short = swept_high and not (taken_short or (one_per_day and taken_long))
+                if not both_sides:
+                    # Default: only the first side to sweep is tradeable.
+                    if swept_low and swept_high:
+                        can_long = can_long and not taken_short
+                        can_short = can_short and not taken_long
+
+                inverted_long = (ref_high == ref_high and b.c > ref_high)
+                inverted_short = (ref_low == ref_low and b.c < ref_low)
+
+                # In retest mode the inversion only ARMS the trade; the entry
+                # waits for price to come back to the flipped zone. Entering
+                # on the inversion bar's close and entering on the retest are
+                # materially different trades, which is why both exist.
+                if csd_mode == "ifvg" and ifvg_entry == "retest":
+                    if can_long and inverted_long and pending_long_zone is None:
+                        pending_long_zone = dict(last_bear_fvg)
+                        pending_long_zone["armed_at"] = k
+                        last_bear_fvg = None
+                        inverted_long = False
+                    elif can_short and inverted_short and pending_short_zone is None:
+                        pending_short_zone = dict(last_bull_fvg)
+                        pending_short_zone["armed_at"] = k
+                        last_bull_fvg = None
+                        inverted_short = False
+                    else:
+                        inverted_long = inverted_short = False
+
+                    # The retest may only fill on a bar AFTER the inversion.
+                    # The inverting bar necessarily traded through the zone on
+                    # its way to closing above it, so accepting a fill there
+                    # would book a price that happened BEFORE the close which
+                    # generated the signal -- textbook lookahead, and it
+                    # flatters R badly because it is always the best price of
+                    # the bar.
+                    if (pending_long_zone is not None
+                            and k > pending_long_zone["armed_at"]
+                            and b.l <= pending_long_zone["hi"]):
+                        inverted_long = True
+                    if (pending_short_zone is not None
+                            and k > pending_short_zone["armed_at"]
+                            and b.h >= pending_short_zone["lo"]):
+                        inverted_short = True
+
+                if can_long and av == av and av > 0 and inverted_long:
+                    if csd_mode == "ifvg" and ifvg_entry == "retest":
+                        entry = pending_long_zone["hi"]
+                    else:
+                        entry = b.c
+                    stop = sweep_low_px - stop_buffer_atr * av
+                    target = asia_high
+                    risk, reward = entry - stop, target - entry
+                    if risk > 0 and reward > 0 and (min_rr <= 0 or reward / risk >= min_rr):
+                        start_long[k] = True
+                        stops[k], targets[k] = stop, target
+                        entries[k] = entry
+                        taken_long = True
+                        pending_long_zone = None
+                        if csd_mode == "ifvg":
+                            last_bear_fvg = None
+                elif can_short and av == av and av > 0 and inverted_short:
+                    if csd_mode == "ifvg" and ifvg_entry == "retest":
+                        entry = pending_short_zone["lo"]
+                    else:
+                        entry = b.c
+                    stop = sweep_high_px + stop_buffer_atr * av
+                    target = asia_low
+                    risk, reward = stop - entry, entry - target
+                    if risk > 0 and reward > 0 and (min_rr <= 0 or reward / risk >= min_rr):
+                        start_short[k] = True
+                        stops[k], targets[k] = stop, target
+                        entries[k] = entry
+                        taken_short = True
+                        pending_short_zone = None
+                        if csd_mode == "ifvg":
+                            last_bull_fvg = None
+
+                # Update the trackers AFTER this bar has been judged, so a bar
+                # can never be both the reference and the trigger.
+                if b.c < b.o:
+                    last_down_high = b.h
+                elif b.c > b.o:
+                    last_up_low = b.l
+                for g in fvg_by_bar.get(k, ()):
+                    if g["dir"] == -1:
+                        last_bear_fvg = dict(g)
+                    else:
+                        last_bull_fvg = dict(g)
+
+            i = j
+
+        self.start_long = start_long
+        self.start_short = start_short
+        self.stops = stops
+        self.targets = targets
+        # Only the iFVG retest mode fills away from the signal bar's close;
+        # every other mode enters at the close, where `entries` must stay
+        # absent so brackets.py keeps its default (and lookahead-free) path.
+        if csd_mode == "ifvg" and ifvg_entry == "retest":
+            self.entries = entries
+            self.allow_entry_bar_fill = True
+        # One fixed target, no scale-out: the transcript names a single
+        # destination (the opposite Asia level), so inventing a partial exit
+        # would change the payoff into something he never described.
+        self.partial_at_tp1 = False
+
+        positions = ["FLAT"] * n
+        pos = "FLAT"
+        for k in range(n):
+            if start_long[k]:
+                pos = "LONG"
+            elif start_short[k]:
+                pos = "SHORT"
+            positions[k] = pos
+        self.positions = positions
+
+    def decide(self, i):
+        return self.positions[i]
+
+    def to_pine(self):
+        return ("// Full Pine Script v6 source: see pine/asia_sweep.pine in this\n"
+                "// repo. It is a strategy(), so TradingView's Strategy Tester\n"
+                "// backtests it on real intraday data -- which this one needs,\n"
+                "// since the sample data here is daily and the session logic\n"
+                "// degenerates on it. Inputs mirror this class one-for-one.\n")
 
 
 REGISTRY = {
@@ -703,12 +1647,17 @@ REGISTRY = {
     "macd": MACDCrossover,
     "stoch": StochasticReversion,
     "vwap": VWAPReversion,
+    "vwapfade": VWAPATRFade,
+    "nyopen": NYOpenEMA,
     "supertrend": SupertrendFollow,
     "roc": MomentumROC,
     "bollrsi": BollingerRSI,
     "orb": OpeningRangeBreakout,
     "po3": PowerOfThree,
     "lorentzian": LorentzianClassification,
+    "sdz": SupplyDemandStructure,
+    "nowick": NoWickRetrace,
+    "asiasweep": AsiaSweepCSD,
 }
 
 

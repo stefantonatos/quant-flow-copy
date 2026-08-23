@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>QuantFlow Bridge</title>
+  <style>
+    body { font: 13px system-ui, sans-serif; padding: 16px; width: 340px; }
+    label { display: block; margin: 12px 0 4px; font-weight: 600; }
+    input[type=text] { width: 100%; padding: 6px; box-sizing: border-box; }
+    .row { display: flex; align-items: center; gap: 6px; margin-top: 12px; }
+    button { margin-top: 14px; padding: 7px 14px; }
+    .note { margin-top: 14px; padding: 8px; background: #fff6e5;
+            border-left: 3px solid #f0a000; line-height: 1.45; }
+    #status { margin-top: 10px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h3>QuantFlow TradingView Bridge</h3>
+
+  <label for="endpoint">Bridge endpoint</label>
+  <input id="endpoint" type="text" placeholder="http://127.0.0.1:8787/webhook">
+
+  <label for="secret">Shared secret</label>
+  <input id="secret" type="text" placeholder="must match --secret on the server">
+
+  <div class="row">
+    <input id="notify" type="checkbox">
+    <label for="notify" style="margin:0;font-weight:400">Notify on send and on rejection</label>
+  </div>
+
+  <button id="save">Save</button>
+  <button id="test">Send test alert</button>
+  <div id="status"></div>
+
+  <div class="note">
+    The tab must stay open on your chart for this to catch anything. If you
+    have a paid TradingView plan, use a webhook instead — it runs server-side
+    and works with the browser closed.
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

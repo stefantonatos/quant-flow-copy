@@ -1,0 +1,313 @@
+//@version=6
+// ============================================================================
+// ==== SMT DIVERGENCE + SWEEP + CSD ==========================================
+// ============================================================================
+//
+// From a prop-account trader's daily recap. His stated confluences, in order:
+//
+//   1. Higher-timeframe bearish fair value gap that price is delivering out of
+//   2. Liquidity resting above (all-time highs) and below (sell-side)
+//   3. A sweep of the highs on market open
+//   4. SMT DIVERGENCE: NQ sweeps its high, ES does NOT follow
+//   5. Drop to a low timeframe, wait for a bearish FVG + change in state of
+//      delivery, enter short on that close
+//   6. Stop above the swing high, target the "low resistance liquidity" below
+//
+// Four of those six were already in this repo before this file existed. The
+// one genuinely new mechanism is SMT, and that is what this script is really
+// for: NQ making a high that ES refuses to confirm means one index reached
+// for liquidity rather than both markets actually going up.
+//
+// ---------------------------------------------------------------------------
+// WHAT COULD NOT BE MECHANIZED, AND WHY THAT MATTERS
+// ---------------------------------------------------------------------------
+// He picks his target by eye: some lows are "low resistance" and some are
+// "high resistance ... protected by this gap". That is a judgement call about
+// which lows are clean, and there is no rule in the video to copy. This script
+// substitutes an explicit choice -- the most recent confirmed swing low, or a
+// fixed R multiple -- via `targetMode`.
+//
+// So results here measure THIS interpretation, not his trading. The gap
+// between the two is not small: target selection is most of what determines
+// the R on every trade.
+//
+// He also states he cut the example trade early, "around 20 points to secure
+// the day", because he is trading to a prop-firm payout rule rather than to
+// the setup. So even the winning example in the video is not the strategy
+// this script tests.
+//
+// ---------------------------------------------------------------------------
+// ON THE SOURCE
+// ---------------------------------------------------------------------------
+// The back half of that video is an affiliate funnel: a discount code for
+// funded-account firms, weekly account giveaways for people who use it, and a
+// Discord. He is paid per account purchased through that code. The payout
+// screenshots are marketing for the referral business, not an audited track
+// record, and one winning recap chosen after the fact is not evidence about
+// anything. None of that makes the SETUP wrong -- SMT is a real, testable
+// idea, which is why this file exists -- but the numbers attached to it are
+// advertising and should be given no weight at all.
+//
+// SET COMMISSION AND SLIPPAGE before reading any result.
+// ============================================================================
+
+strategy("SMT Sweep CSD", shorttitle="SMT", overlay=true,
+         max_lines_count=500, max_boxes_count=500, max_labels_count=500,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+         commission_type=strategy.commission.percent, commission_value=0.0,
+         slippage=1, initial_capital=10000, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true)
+
+// ==================
+// ==== Inputs ======
+// ==================
+
+grpSMT   = "SMT Divergence"
+grpEntry = "Entry"
+grpTrade = "Trade Geometry"
+grpDisp  = "Display"
+
+refSymbol = input.symbol("CME_MINI:ES1!", "Correlated Symbol", group=grpSMT,
+     tooltip="The instrument that has to DISAGREE. Trading NQ, this is ES. They must actually be correlated -- run this with an unrelated symbol and every reading is meaningless noise.")
+smtLookback = input.int(20, "SMT Lookback (bars)", minval=2, group=grpSMT,
+     tooltip="How far back the 'new high' is measured. This bar's high must exceed the highest high of the previous N bars while the reference does not.")
+requireSMT = input.bool(true, "Require SMT", group=grpSMT,
+     tooltip="Off = trade the sweep + CSD without divergence confirmation. Worth testing both: if SMT adds nothing, the trade count will barely move and the expectancy will not improve.")
+
+csdMode = input.string("candle", "Change in State of Delivery", options=["candle", "ifvg"], group=grpEntry,
+     tooltip="candle = first close back below the low of the most recent up-close bar. ifvg = a bullish fair value gap that price closes back below, flipping it from support to resistance. An inversion IS a change in state of delivery, so these are two readings of one idea.")
+fvgMinSize = input.float(0.0, "Minimum gap size (price)", minval=0, group=grpEntry)
+setupExpiry = input.int(24, "Setup expires after (bars)", minval=1, group=grpEntry,
+     tooltip="An SMT that never produces a CSD goes stale. Without this the script would hold a setup open all session and enter on something unrelated.")
+
+pivotLookback = input.int(5, "Swing Lookback", minval=1, group=grpTrade,
+     tooltip="Bars either side of a swing. A pivot is only confirmed this many bars after it forms -- that lag is what keeps this honest.")
+stopBufferATR = input.float(0.25, "Stop Buffer beyond the swing (x ATR)", minval=0, step=0.05, group=grpTrade)
+targetMode = input.string("swing", "Target", options=["swing", "rr"], group=grpTrade,
+     tooltip="swing = the most recent confirmed swing low, the closest mechanical stand-in for his 'obvious low'. rr = a fixed R multiple. He picks his target by eye and no rule in the video reproduces that.")
+targetRR = input.float(3.0, "Target R multiple (rr mode)", minval=0.5, step=0.5, group=grpTrade)
+minRR = input.float(0.0, "Minimum Reward:Risk (0 = take everything)", minval=0, step=0.5, group=grpTrade)
+atrLen = input.int(14, "ATR Length", minval=1, group=grpTrade)
+
+showSMT     = input.bool(true, "SMT markers", group=grpDisp)
+showBracket = input.bool(true, "TP / SL boxes", group=grpDisp)
+showCSD     = input.bool(true, "CSD line", group=grpDisp)
+boxTransp   = input.int(82, "TP/SL box transparency", minval=0, maxval=100, group=grpDisp)
+tpColor     = input.color(#089981, "Take Profit", group=grpDisp)
+slColor     = input.color(#F23645, "Stop Loss", group=grpDisp)
+csdColor    = input.color(#FF9800, "CSD line", group=grpDisp)
+smtColor    = input.color(#AA00FF, "SMT marker", group=grpDisp)
+
+// ==========================================
+// ==== Indicators -- global scope only =====
+// ==========================================
+
+atrVal = ta.atr(atrLen)
+
+// lookahead_off is mandatory. The default would let the reference symbol
+// hand back data from the future on historical bars, which makes an SMT
+// backtest look extraordinary and mean nothing at all.
+[refHigh, refLow] = request.security(refSymbol, timeframe.period, [high, low],
+     lookahead=barmerge.lookahead_off)
+
+ph = ta.pivothigh(high, pivotLookback, pivotLookback)
+pl = ta.pivotlow(low, pivotLookback, pivotLookback)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+if not na(ph)
+    lastSwingHigh := ph
+if not na(pl)
+    lastSwingLow := pl
+
+priorHigh    = ta.highest(high, smtLookback)[1]
+priorLow     = ta.lowest(low, smtLookback)[1]
+refPriorHigh = ta.highest(refHigh, smtLookback)[1]
+refPriorLow  = ta.lowest(refLow, smtLookback)[1]
+
+// ==========================================
+// ==== SMT divergence ======================
+// ==========================================
+// Bearish: this symbol makes a new high, the correlated one does not. Both
+// markets rallying together is just a rally -- flagging that would fire on
+// every trend and mean nothing.
+
+bearSMT = (not na(refHigh) and not na(priorHigh) and not na(refPriorHigh) and
+     high > priorHigh and refHigh <= refPriorHigh)
+bullSMT = (not na(refLow) and not na(priorLow) and not na(refPriorLow) and
+     low < priorLow and refLow >= refPriorLow)
+
+// ==========================================
+// ==== Fair value gaps =====================
+// ==========================================
+
+var float bearFvgHi = na
+var float bullFvgLo = na
+
+gapUp = low - high[2]
+gapDn = low[2] - high
+
+// ==========================================
+// ==== Armed setups ========================
+// ==========================================
+// The SMT arms a setup; the CSD triggers it. Both are required, and the arm
+// expires so a stale divergence cannot fire on unrelated price action hours
+// later.
+
+var bool  armedShort   = false
+var bool  armedLong    = false
+var int   armedShortAt = na
+var int   armedLongAt  = na
+var float sweepHigh    = na
+var float sweepLow     = na
+
+if bearSMT or (not requireSMT and high > priorHigh)
+    armedShort   := true
+    armedShortAt := bar_index
+    sweepHigh    := high
+else if armedShort and high > nz(sweepHigh, high)
+    sweepHigh := high
+
+if bullSMT or (not requireSMT and low < priorLow)
+    armedLong   := true
+    armedLongAt := bar_index
+    sweepLow    := low
+else if armedLong and low < nz(sweepLow, low)
+    sweepLow := low
+
+if armedShort and bar_index - armedShortAt > setupExpiry
+    armedShort := false
+if armedLong and bar_index - armedLongAt > setupExpiry
+    armedLong := false
+
+// ==========================================
+// ==== CSD trigger =========================
+// ==========================================
+// References are the trackers as they stood BEFORE this bar; they are updated
+// at the very bottom, so a bar can never be both the reference and the trigger.
+
+var float lastUpLow    = na
+var float lastDownHigh = na
+
+refShortLevel = csdMode == "ifvg" ? bullFvgLo : lastUpLow
+refLongLevel  = csdMode == "ifvg" ? bearFvgHi : lastDownHigh
+
+shortSignal = (armedShort and bar_index > armedShortAt and
+     not na(refShortLevel) and close < refShortLevel and
+     strategy.position_size == 0 and not na(atrVal) and atrVal > 0)
+longSignal = (armedLong and bar_index > armedLongAt and
+     not na(refLongLevel) and close > refLongLevel and
+     strategy.position_size == 0 and not na(atrVal) and atrVal > 0)
+
+// ==========================================
+// ==== Orders + drawing ====================
+// ==========================================
+// Drawn inline, not in a helper: Pine functions cannot assign to global
+// variables, so folding this into a function will not compile.
+
+var box   tpBox    = na
+var box   slBox    = na
+var line  entryLn  = na
+var line  csdLn    = na
+var label tpLbl    = na
+var label slLbl    = na
+var float restStop = na
+var float restTgt  = na
+var float restEnt  = na
+var float restRR   = na
+
+newTrade = false
+
+if shortSignal
+    st = math.max(nz(sweepHigh, high), nz(lastSwingHigh, high)) + stopBufferATR * atrVal
+    risk = st - close
+    tgt = targetMode == "rr" ? close - targetRR * risk : nz(lastSwingLow, na)
+    if risk > 0 and not na(tgt) and close - tgt > 0 and
+         (minRR <= 0 or (close - tgt) / risk >= minRR)
+        restStop := st
+        restTgt  := tgt
+        restEnt  := close
+        restRR   := (close - tgt) / risk
+        newTrade := true
+        armedShort := false
+        strategy.entry("SMT Short", strategy.short)
+        strategy.exit("SMT Short X", from_entry="SMT Short", stop=st, limit=tgt)
+else if longSignal
+    st = math.min(nz(sweepLow, low), nz(lastSwingLow, low)) - stopBufferATR * atrVal
+    risk = close - st
+    tgt = targetMode == "rr" ? close + targetRR * risk : nz(lastSwingHigh, na)
+    if risk > 0 and not na(tgt) and tgt - close > 0 and
+         (minRR <= 0 or (tgt - close) / risk >= minRR)
+        restStop := st
+        restTgt  := tgt
+        restEnt  := close
+        restRR   := (tgt - close) / risk
+        newTrade := true
+        armedLong := false
+        strategy.entry("SMT Long", strategy.long)
+        strategy.exit("SMT Long X", from_entry="SMT Long", stop=st, limit=tgt)
+
+if newTrade and showBracket
+    tpBox := box.new(bar_index, restTgt, bar_index + 1, restEnt,
+         bgcolor=color.new(tpColor, boxTransp), border_color=color.new(tpColor, 45))
+    slBox := box.new(bar_index, restEnt, bar_index + 1, restStop,
+         bgcolor=color.new(slColor, boxTransp), border_color=color.new(slColor, 45))
+    entryLn := line.new(bar_index, restEnt, bar_index + 1, restEnt,
+         color=color.new(color.white, 20), width=2)
+    tpLbl := label.new(bar_index + 1, restTgt,
+         "TP " + str.tostring(restTgt, format.mintick) + "   " +
+         str.tostring(restRR, "#.##") + "R",
+         style=label.style_label_left, textcolor=tpColor,
+         color=color.rgb(0, 0, 0, 100), size=size.small)
+    slLbl := label.new(bar_index + 1, restStop,
+         "SL " + str.tostring(restStop, format.mintick),
+         style=label.style_label_left, textcolor=slColor,
+         color=color.rgb(0, 0, 0, 100), size=size.small)
+
+if newTrade and showCSD
+    lvl = restEnt > restTgt ? refShortLevel : refLongLevel
+    csdLn := line.new(bar_index - 6, lvl, bar_index + 1, lvl, color=csdColor, width=2)
+
+if strategy.position_size != 0 and not na(tpBox)
+    box.set_right(tpBox, bar_index + 1)
+    box.set_right(slBox, bar_index + 1)
+    line.set_x2(entryLn, bar_index + 1)
+    label.set_x(tpLbl, bar_index + 1)
+    label.set_x(slLbl, bar_index + 1)
+    if not na(csdLn)
+        line.set_x2(csdLn, bar_index + 1)
+
+plotshape(showSMT and bearSMT, title="Bearish SMT", style=shape.xcross,
+          location=location.abovebar, color=smtColor, size=size.tiny)
+plotshape(showSMT and bullSMT, title="Bullish SMT", style=shape.xcross,
+          location=location.belowbar, color=smtColor, size=size.tiny)
+plotshape(shortSignal, title="Short entry", style=shape.triangledown,
+          location=location.abovebar, color=slColor, size=size.small)
+plotshape(longSignal, title="Long entry", style=shape.triangleup,
+          location=location.belowbar, color=tpColor, size=size.small)
+
+// ==================
+// ==== Alerts ======
+// ==================
+// alert(), not alertcondition() -- the latter is inert inside a strategy().
+
+if bearSMT
+    alert("SMT: bearish divergence vs " + refSymbol + " on " + syminfo.ticker,
+          alert.freq_once_per_bar_close)
+if shortSignal or longSignal
+    alert("SMT: entry on " + syminfo.ticker + " " + timeframe.period,
+          alert.freq_once_per_bar_close)
+
+// ==========================================
+// ==== Tracker update -- MUST BE LAST ======
+// ==========================================
+
+if close < open
+    lastDownHigh := high
+else if close > open
+    lastUpLow := low
+
+if gapDn > fvgMinSize
+    bearFvgHi := low[2]
+else if gapUp > fvgMinSize
+    bullFvgLo := high[2]

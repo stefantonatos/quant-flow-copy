@@ -201,6 +201,79 @@ def vwap_rolling(bars: List[Bar], n: int = 20) -> List[float]:
     return out
 
 
+def vwap_session(bars: List[Bar], anchor_hour: int = 0,
+                 anchor_tz: Optional[str] = None) -> List[float]:
+    """Session-anchored VWAP: cumulative typical-price*volume / cumulative
+    volume, reset at the start of every new session.
+
+    `anchor_hour` is the hour the trading day BEGINS. The default 0
+    (midnight UTC) is right for forex. It is wrong for index CFDs: real
+    USATECH/NAS100 hourly data runs 23:00 -> 21:00 UTC, so a midnight reset
+    fires an hour INTO the session, splitting it in two and anchoring the
+    VWAP to the wrong price. Pass anchor_hour=23 for those. Getting this
+    wrong doesn't error -- it just quietly computes a VWAP that disagrees
+    with the one plotted on the chart, which is the whole failure mode
+    this function was written to avoid.
+
+    `anchor_tz` (e.g. "America/New_York") makes `anchor_hour` a LOCAL
+    exchange hour instead of a UTC one, which is the only correct way to
+    anchor an equity index. The US cash open is 09:30 New York, and that is
+    13:30 UTC in summer but 14:30 UTC in winter -- so a fixed UTC integer is
+    guaranteed to be an hour wrong for roughly half of every year. That is
+    not hypothetical: sweeping fixed UTC anchors over 15 years of NAS100,
+    SPX500 and US2000 split the win between 13 and 14 across the three, which
+    is exactly the fingerprint of a DST boundary being straddled.
+
+    Pass anchor_hour=9, anchor_tz="America/New_York" for US equity indices.
+    zoneinfo carries the historic rules, so the 2007 change to the US DST
+    dates is handled for free -- and it matters, since data here starts 2005.
+
+    This is what TradingView's built-in `ta.vwap()` computes by default
+    (anchored to the session), and it is a different number from
+    `vwap_rolling()` above, which is a fixed N-bar window. The distinction
+    matters here specifically: a strategy defined relative to "VWAP" needs
+    to agree with what's actually plotted on the chart it's compared against,
+    not a same-named but differently-defined approximation -- the exact kind
+    of silent divergence this project has been burned by before (see
+    normalize_windowed() in CLAUDE.md).
+
+    Bars with no real volume (v == 0, common on forex feeds) fall back to
+    weighting every bar equally, which degrades gracefully to a plain
+    typical-price average rather than raising or returning nonsense.
+    """
+    import datetime
+    tz = None
+    if anchor_tz is not None:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(anchor_tz)
+
+    out = [float("nan")] * len(bars)
+    cum_pv = 0.0
+    cum_v = 0.0
+    last_day = None
+    for i, b in enumerate(bars):
+        # Shifting back by anchor_hour makes every bar of one trading day
+        # share a calendar date, so the reset lands on the real session open.
+        if tz is None:
+            day = datetime.datetime.utcfromtimestamp(b.t - anchor_hour * 3600).date()
+        else:
+            # Convert to exchange-local wall time FIRST, then shift. Doing it
+            # in this order is what makes the reset follow the local clock
+            # across a DST change instead of drifting an hour.
+            local = datetime.datetime.fromtimestamp(b.t, tz)
+            day = (local - datetime.timedelta(hours=anchor_hour)).date()
+        if day != last_day:
+            cum_pv = 0.0
+            cum_v = 0.0
+            last_day = day
+        tp = (b.h + b.l + b.c) / 3.0
+        v = b.v if b.v > 0 else 1.0
+        cum_pv += tp * v
+        cum_v += v
+        out[i] = cum_pv / cum_v if cum_v > 0 else tp
+    return out
+
+
 def supertrend(bars: List[Bar], n: int = 10, mult: float = 3.0):
     """Returns (line, direction) where direction[i] is 1 (up/long bias) or
     -1 (down/short bias)."""
@@ -312,6 +385,127 @@ def adx(bars: List[Bar], n: int = 14) -> List[float]:
     out = [x / n if x else 0.0 for x in out]  # Wilder's DX smoothing is an average, unlike TR/DM
     for i in range(min(2 * n, ln)):
         out[i] = float("nan")
+    return out
+
+
+def pivots(bars: List[Bar], left: int = 5, right: int = 5):
+    """Swing high/low detection, matching Pine's ta.pivothigh / ta.pivotlow.
+
+    A pivot high at bar `i` needs `left` strictly-lower highs before it and
+    `right` strictly-lower highs after it (mirrored for lows). Returns two
+    parallel boolean lists indexed by the bar the pivot IS, not the bar it
+    became knowable on.
+
+    THE LOOKAHEAD TRAP: a pivot at bar `i` cannot be known until bar
+    `i + right` has closed -- that's the whole point of the right-hand
+    confirmation. Indexing these lists at bar `i` while iterating a backtest
+    is reading `right` bars into the future. Use `confirmed_pivots()` instead
+    unless you have a specific reason not to; it returns the same information
+    keyed by confirmation bar, which is what a causal strategy actually needs.
+    """
+    n = len(bars)
+    is_ph = [False] * n
+    is_pl = [False] * n
+    if left < 1 or right < 1:
+        raise ValueError("left and right must both be >= 1")
+    for i in range(left, n - right):
+        h, l = bars[i].h, bars[i].l
+        if all(bars[j].h < h for j in range(i - left, i)) and \
+           all(bars[j].h < h for j in range(i + 1, i + right + 1)):
+            is_ph[i] = True
+        if all(bars[j].l > l for j in range(i - left, i)) and \
+           all(bars[j].l > l for j in range(i + 1, i + right + 1)):
+            is_pl[i] = True
+    return is_ph, is_pl
+
+
+def confirmed_pivots(bars: List[Bar], left: int = 5, right: int = 5):
+    """Same pivots, re-keyed by the bar on which they become knowable.
+
+    Returns two lists of (confirm_index, pivot_index, price). A strategy
+    iterating bar-by-bar can safely consume every entry whose
+    `confirm_index <= i` and nothing else -- which makes the causality
+    constraint structural rather than something each caller has to remember.
+    """
+    is_ph, is_pl = pivots(bars, left, right)
+    highs = [(i + right, i, bars[i].h) for i in range(len(bars)) if is_ph[i]]
+    lows = [(i + right, i, bars[i].l) for i in range(len(bars)) if is_pl[i]]
+    return highs, lows
+
+
+def smt_divergence(bars: List[Bar], ref_bars: List[Bar], lookback: int = 20):
+    """SMT divergence: two correlated instruments disagreeing at an extreme.
+
+    A bearish SMT at bar `i` means THIS series made a new high over the
+    lookback window while the reference series did NOT. NQ sweeps its
+    all-time high, ES does not follow -- so the "breakout" was one index
+    reaching for liquidity rather than both markets actually going up.
+    Bullish SMT is the mirror: this series makes a new low, the reference
+    holds.
+
+    Returns two boolean lists (bearish, bullish), parallel to `bars`.
+
+    ALIGNMENT IS BY TIMESTAMP, NOT BY INDEX. Two real feeds will not have
+    identical bar counts -- different session breaks, holidays and gaps see
+    to that -- so lining them up positionally silently compares different
+    moments in time and invents divergences that never happened. Bars with
+    no exact timestamp match in the reference produce no signal at all,
+    which is the honest answer rather than a guessed one.
+
+    CAUSALITY: both windows end at `i - 1` and the test uses bar `i`'s own
+    high/low, so every input is closed by the time the signal appears.
+    """
+    n = len(bars)
+    bearish = [False] * n
+    bullish = [False] * n
+    if lookback < 1 or n == 0 or not ref_bars:
+        return bearish, bullish
+
+    ref_at = {b.t: k for k, b in enumerate(ref_bars)}
+
+    for i in range(lookback, n):
+        k = ref_at.get(bars[i].t)
+        if k is None or k < lookback:
+            continue
+        prior_high = max(b.h for b in bars[i - lookback:i])
+        prior_low = min(b.l for b in bars[i - lookback:i])
+        ref_prior_high = max(b.h for b in ref_bars[k - lookback:k])
+        ref_prior_low = min(b.l for b in ref_bars[k - lookback:k])
+
+        if bars[i].h > prior_high and ref_bars[k].h <= ref_prior_high:
+            bearish[i] = True
+        if bars[i].l < prior_low and ref_bars[k].l >= ref_prior_low:
+            bullish[i] = True
+    return bearish, bullish
+
+
+def fvgs(bars: List[Bar], min_size: float = 0.0):
+    """Three-bar fair value gaps (imbalances).
+
+    A bullish FVG exists at bar `i` when bar i's low sits ABOVE bar i-2's
+    high: price moved so fast that the range between them was never traded
+    through. The mirror case is a bearish FVG.
+
+    Returned as dicts: {"i", "dir", "lo", "hi"} with dir 1 = bullish
+    (the zone acts as support), -1 = bearish (resistance).
+
+    CAUSALITY. A gap at bar `i` needs bar `i` to have closed, so it is
+    knowable at `i` and not before -- unlike a pivot, there is no
+    right-hand confirmation lag here, because all three bars are in the
+    past. The `i` field is the bar it becomes usable on, so a caller can
+    consume every gap with `i <= current_bar` and nothing else.
+
+    `min_size` filters out gaps too small to be meaningful; on 5-decimal FX
+    a one-tick gap is noise, not an imbalance.
+    """
+    out = []
+    for i in range(2, len(bars)):
+        gap_up = bars[i].l - bars[i - 2].h
+        gap_dn = bars[i - 2].l - bars[i].h
+        if gap_up > min_size:
+            out.append({"i": i, "dir": 1, "lo": bars[i - 2].h, "hi": bars[i].l})
+        elif gap_dn > min_size:
+            out.append({"i": i, "dir": -1, "lo": bars[i].h, "hi": bars[i - 2].l})
     return out
 
 

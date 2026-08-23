@@ -10,7 +10,9 @@ Usage:
   python run.py "macd" --data sample --walkforward 4 --montecarlo 1000
 
 Flags:
-  --data sample|yahoo|stooq|binance
+  --data sample|yahoo|stooq|binance|<csv file, directory, or glob>
+                      A directory or glob of CSVs is stitched into one series
+                      (deduped by timestamp), e.g. --data fixtures/data
   --symbol SYM        (for yahoo/stooq/binance)
   --range R           yahoo history range: 1mo/6mo/1y/5y/max (default 1y)
   --interval I        bar size: yahoo 1d/1wk/1mo, binance 1m/5m/15m/1h/1d... (default 1d)
@@ -21,6 +23,12 @@ Flags:
   --plot              print an ASCII equity curve
   --walkforward K     split into K contiguous out-of-sample folds
   --montecarlo N      bootstrap-resample realized trades N times
+  --bracket           also run a TP1/TP2/SL bracket backtest (needs a strategy
+                      that exposes start_long/start_short, e.g. lorentzian).
+                      Prints both pessimistic and optimistic same-bar-tie
+                      resolutions side by side -- see brackets.py.
+  --sl-atr N          bracket stop distance in ATR multiples (default 1.0)
+  --be-atr N          bracket breakeven+ offset in ATR multiples (default 0.15)
   --metric M          optimize: rank by sharpe|total_return|profit_factor (default sharpe)
   --top N             optimize: how many top candidates to show (default 5)
 
@@ -42,7 +50,9 @@ sys.path.insert(0, HERE)
 from engine import run
 from gen import generate, plan_from_text
 from strategies import REGISTRY, list_strategies
-from opt import optimize, format_results, PARAM_GRIDS
+from opt import (optimize, format_results, PARAM_GRIDS,
+                 is_bracket_strategy, optimize_brackets, format_bracket_results)
+from brackets import run_both_policies
 import data as D
 
 
@@ -133,6 +143,40 @@ def _run_montecarlo(rep, capital, sims):
     print(f"   max drawdown   P50={pct(maxdds, 0.50) * 100:.2f}%  P95={pct(maxdds, 0.95) * 100:.2f}%")
 
 
+def _run_bracket(strat, bars, sl_atr, be_atr):
+    """TP1/TP2/SL execution against high/low, not just closes -- the thing
+    engine.run() can't do. Reports both same-bar-tie resolutions side by
+    side; the gap between them is how much of any headline win rate is
+    fill-order guesswork rather than real edge."""
+    if not hasattr(strat, "start_long") or not hasattr(strat, "start_short"):
+        print(f"\n>> BRACKET skipped: {type(strat).__name__} doesn't expose "
+              f"start_long/start_short (lorentzian and sdz do).")
+        return
+    structural = hasattr(strat, "stops") and hasattr(strat, "targets")
+    limit_entry = getattr(strat, "entries", None) is not None
+    if structural:
+        print(f"\n>> BRACKET (structural stops + targets from the strategy, "
+              f"breakeven+ {be_atr}x ATR"
+              f"{', limit entries at the marked level' if limit_entry else ''})")
+    else:
+        print(f"\n>> BRACKET (SL {sl_atr}x ATR, TP1 1R, TP2 2R, "
+              f"breakeven+ {be_atr}x ATR)")
+    # Strategies that compute their own structural levels (sdz, nowick) pass
+    # them through; ones that don't (lorentzian) fall back to ATR-derived
+    # stops. `entries` + allow_entry_bar_fill only apply to limit-entry
+    # strategies -- see brackets._resolve on why that switch is not free.
+    pess, opt = run_both_policies(bars, strat.start_long, strat.start_short,
+                                  sl_atr=sl_atr, be_offset_atr=be_atr,
+                                  stops=getattr(strat, "stops", None),
+                                  targets=getattr(strat, "targets", None),
+                                  entries=getattr(strat, "entries", None),
+                                  allow_entry_bar_fill=getattr(
+                                      strat, "allow_entry_bar_fill", False),
+                                  partial_at_tp1=getattr(strat, "partial_at_tp1", True))
+    print(pess.summary())
+    print(opt.summary())
+
+
 def main(argv):
     args = argv[1:]
     if not args or args[0] == "list":
@@ -151,6 +195,9 @@ def main(argv):
     plot = False
     walkforward = 0
     montecarlo = 0
+    bracket = False
+    sl_atr = 1.0
+    be_atr = 0.15
     metric = "sharpe"
     top_n = 5
     yahoo_range = "1y"
@@ -173,6 +220,12 @@ def main(argv):
             walkforward = int(args[i + 1]); i += 2; continue
         if a == "--montecarlo":
             montecarlo = int(args[i + 1]); i += 2; continue
+        if a == "--bracket":
+            bracket = True; i += 1; continue
+        if a == "--sl-atr":
+            sl_atr = float(args[i + 1]); i += 2; continue
+        if a == "--be-atr":
+            be_atr = float(args[i + 1]); i += 2; continue
         if a == "--metric":
             metric = args[i + 1]; i += 2; continue
         if a == "--top":
@@ -211,6 +264,11 @@ def main(argv):
         bars = D.from_stooq(symbol or "aapl.us")
     elif data_src == "binance":
         bars = D.from_binance(symbol or "BTCUSDT", interval=interval, limit=limit)
+    elif os.path.exists(data_src) or any(ch in data_src for ch in "*?["):
+        # A path, a directory, or a glob -- real exported data. Several files
+        # are stitched, deduped and sorted, since a venue's download cap means
+        # a year of intraday bars arrives as a dozen separate files.
+        bars = D.load_path(data_src)
     else:
         print(f"Unknown source '{data_src}', falling back to sample.")
         bars = D.load_csv(D.sample_csv())
@@ -225,8 +283,15 @@ def main(argv):
         return
 
     if optimize_mode:
-        results = optimize(strat_key, bars, capital, fee, metric=metric, top_n=top_n)
-        print(format_results(strat_key, results, metric))
+        # Bracket strategies must be scored through the bracket engine: their
+        # params only move stops/targets/entries, which engine.run() cannot
+        # see, so ranking them by Sharpe would rank identical numbers.
+        if is_bracket_strategy(strat_key):
+            print(format_bracket_results(
+                strat_key, optimize_brackets(strat_key, bars, top_n=top_n)))
+        else:
+            results = optimize(strat_key, bars, capital, fee, metric=metric, top_n=top_n)
+            print(format_results(strat_key, results, metric))
         return
 
     strat = strat_cls(bars=bars, params=params)
@@ -239,6 +304,8 @@ def main(argv):
         _run_walkforward(strat_cls, params, bars, capital, fee, walkforward)
     if montecarlo:
         _run_montecarlo(rep, capital, montecarlo)
+    if bracket:
+        _run_bracket(strat, bars, sl_atr, be_atr)
 
 
 if __name__ == "__main__":

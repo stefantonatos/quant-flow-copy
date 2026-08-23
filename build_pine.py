@@ -49,6 +49,25 @@ def main() -> None:
             "changed shape; re-check build_pine.py against the new source")
     base = base.replace(old_decl, new_decl, 1)
 
+    # Max Bars Back defines the whole training window the kNN searches, so it is
+    # the single largest behavioural lever: change it and the model draws its
+    # neighbours from a different set of bars, and nearly every signal moves.
+    #
+    # Upstream defaults to 2000. The paid version's settings panel showed 300
+    # (fixtures/paid_version_settings.md), but its on-chart status line later read
+    # "8 500 4 100 5 ..." -- i.e. 500. The user changes it, so there is no single
+    # right constant here.
+    #
+    # THE STATUS LINE IS THE GROUND TRUTH. It prints every input in order, so to
+    # match the paid version, read its status line and mirror the numbers. 500 is
+    # the last observed value; it stays user-editable in Settings.
+    old_mbb = 'input.int(title="Max Bars Back", defval=2000, group="General Settings")'
+    new_mbb = 'input.int(title="Max Bars Back", defval=500, group="General Settings")'
+    if old_mbb not in base:
+        raise SystemExit(
+            "could not find the Max Bars Back input to patch -- upstream changed shape")
+    base = base.replace(old_mbb, new_mbb, 1)
+
     # TradingView caps shorttitle at 10 characters and rejects the script on
     # save otherwise. Upstream's is 30 ("Lorentzian Classification v2.0"), which
     # the compiler now flags as SHORT_TITLE_TOO_LONG.
@@ -58,6 +77,81 @@ def main() -> None:
         raise SystemExit(
             "could not find the shorttitle to patch -- upstream changed shape")
     base = base.replace(old_short, new_short, 1)
+
+    # "Feature Normalization Length" appears on the paid version's panel, but it is
+    # not a real parameter anywhere in jdehorty's MLExtensions library
+    # (fixtures/mlextensions_source.pine, fetched from TradingView 2026-08-13):
+    # his normalize() takes no length at all -- it tracks the highest/lowest value
+    # ever seen on the WHOLE chart, forever, via `var _historicMin`/`_historicMax`.
+    # The seller must have swapped in a rolling-window version of their own.
+    #
+    # Of the four feature functions, only n_cci and n_wt route through that
+    # unbounded normalize(); n_rsi and n_adx use rescale() with fixed 0-100 bounds
+    # and need no windowing. So only those two get a windowed replacement, added
+    # here rather than in the upstream file. Insert BEFORE series_from -- Pine
+    # requires functions to be declared before they're called.
+    windowed_fns = '''normalize_windowed(series float src, float rmin, float rmax, simple int fnl) =>
+    hi = ta.highest(src, fnl)
+    lo = ta.lowest(src, fnl)
+    rmin + (rmax - rmin) * (src - lo) / math.max(hi - lo, 10e-10)
+
+n_cci_fnl(series float src, simple int n1, simple int n2, simple int fnl) =>
+    normalize_windowed(ta.ema(ta.cci(src, n1), n2), 0, 1, fnl)
+
+n_wt_fnl(series float src, simple int n1, simple int n2, simple int fnl) =>
+    ema1 = ta.ema(src, n1)
+    ema2 = ta.ema(math.abs(src - ema1), n1)
+    ci = (src - ema1) / (0.015 * ema2)
+    wt1 = ta.ema(ci, n2)
+    wt2 = ta.sma(wt1, 4)
+    normalize_windowed(wt1 - wt2, 0, 1, fnl)
+
+'''
+    old_sf = ('series_from(feature_string, _close, _high, _low, _hlc3, f_paramA, f_paramB) =>\n'
+              '    switch feature_string\n'
+              '        "RSI" => ml.n_rsi(_close, f_paramA, f_paramB)\n'
+              '        "WT" => ml.n_wt(_hlc3, f_paramA, f_paramB)\n'
+              '        "CCI" => ml.n_cci(_close, f_paramA, f_paramB)\n'
+              '        "ADX" => ml.n_adx(_high, _low, _close, f_paramA)')
+    new_sf = ('series_from(feature_string, _close, _high, _low, _hlc3, f_paramA, f_paramB, f_fnl) =>\n'
+              '    switch feature_string\n'
+              '        "RSI" => ml.n_rsi(_close, f_paramA, f_paramB)\n'
+              '        "WT" => n_wt_fnl(_hlc3, f_paramA, f_paramB, f_fnl)\n'
+              '        "CCI" => n_cci_fnl(_close, f_paramA, f_paramB, f_fnl)\n'
+              '        "ADX" => ml.n_adx(_high, _low, _close, f_paramA)')
+    if old_sf not in base:
+        raise SystemExit(
+            "could not find series_from() to patch -- upstream changed shape")
+    base = base.replace(old_sf, windowed_fns + old_sf, 1)  # insert helpers first
+    base = base.replace(old_sf, new_sf, 1)                 # then rewrite series_from
+
+    # New input, placed next to Include Full History (same General Settings group,
+    # matching the paid panel's placement beside Max Bars Back / Prediction Lookahead).
+    old_ifh_tail = (
+        'It can provide valuable insights by capturing patterns from different '
+        'market regimes throughout the chart\'s history.")')
+    new_ifh_tail = (
+        old_ifh_tail + '\n\n'
+        'featureNormLength = input.int(title="Feature Normalization Length", '
+        'defval=100, minval=2, group="General Settings", '
+        'tooltip="Rolling window used to rescale the CCI and WaveTrend features '
+        'before distance comparison. Not part of jdehorty\'s original library -- '
+        'his normalize() uses the whole chart\'s all-time high/low -- this '
+        'reproduces the paid version\'s windowed version instead.")')
+    if old_ifh_tail not in base:
+        raise SystemExit(
+            "could not find includeFullHistory to patch -- upstream changed shape")
+    base = base.replace(old_ifh_tail, new_ifh_tail, 1)
+
+    # Thread featureNormLength through the five series_from() call sites.
+    for n in range(1, 6):
+        old_call = (f'series_from(f{n}_string, close, high, low, hlc3, '
+                    f'f{n}_paramA, f{n}_paramB)')
+        new_call = (f'series_from(f{n}_string, close, high, low, hlc3, '
+                    f'f{n}_paramA, f{n}_paramB, featureNormLength)')
+        if old_call not in base:
+            raise SystemExit(f"could not find feature {n}'s series_from() call to patch")
+        base = base.replace(old_call, new_call, 1)
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as f:

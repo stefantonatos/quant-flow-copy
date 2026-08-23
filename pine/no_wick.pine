@@ -1,0 +1,384 @@
+//@version=6
+// ============================================================================
+// ==== NO WICK RETRACE =======================================================
+// ============================================================================
+//
+// @bardfx's "no wick" setup, mechanized. Three rules as he describes them:
+//
+//   1. Mark a wickless candle WITH THE TREND -- a bullish candle with no
+//      bottom wick in an uptrend, a bearish candle with no top wick in a
+//      downtrend.
+//   2. Wait for price to retrace back to that candle.
+//   3. Enter with the trend, stop beyond it, target roughly 1:1.
+//
+// This is the TradingView twin of NoWickRetrace in strategies.py. Inputs,
+// defaults and logic mirror it one-for-one so the two can be compared.
+//
+// ---------------------------------------------------------------------------
+// ON THE "LOCKED" INDICATOR
+// ---------------------------------------------------------------------------
+// The marker he uses is xGhozt Wickless Candles, whose source is protected.
+// It does not matter. "Wickless" is exact equality on OHLC -- low == open on
+// a green candle, high == open on a red one -- so there is no hidden algorithm
+// to recover. The protected part is the drawing, not the definition. If our
+// marks and his ever disagree on the same chart, the cause is the tolerance
+// inputs below, not a missing secret.
+//
+// ---------------------------------------------------------------------------
+// WHY THIS IS A strategy() AND NOT AN indicator()
+// ---------------------------------------------------------------------------
+// It still draws everything, and additionally produces a Strategy Tester
+// report against real chart data. Every backtest in this project so far has
+// run on a synthetic random walk, because the environment the Python side
+// lives in has no market-data access. This file is how the setup finally gets
+// measured on real 15-minute forex.
+//
+// ---------------------------------------------------------------------------
+// TWO THINGS TO UNDERSTAND BEFORE READING ANY NUMBER IT PRODUCES
+// ---------------------------------------------------------------------------
+// 1. THE STOP BUFFER IS THE ENTIRE RISK. Entry sits AT the candle's flat edge,
+//    so "a bit below the candle" is the whole distance to the stop -- and
+//    since the target is rr x risk, that one input sets the entire trade
+//    geometry. Set it too tight and the entry bar's own range covers both the
+//    stop and the target, at which point the result depends on which filled
+//    first, which OHLC data cannot tell you.
+//
+// 2. SET COMMISSION AND SLIPPAGE. At 1:1 with a sub-ATR stop, the spread on
+//    15m FX is a large share of the risk. A gross number here is not a
+//    result. "No edge" and "edge smaller than costs" are different findings
+//    and only the cost-aware run can tell them apart.
+//
+// ---------------------------------------------------------------------------
+// ON THE 100% WIN RATE CLAIM
+// ---------------------------------------------------------------------------
+// At 1:1 you need to win more than 50% just to break even. A perfect week is
+// a claim about a handful of trades; across many students and many weeks,
+// somebody posting one is close to guaranteed. That is selection, not edge.
+// Note also that the premise -- missing wicks tend to get filled -- means the
+// entry level is one price has already demonstrated it returns to. A high
+// fill rate is designed in, and says nothing about what happens after the
+// fill. Read expectancy and profit factor, not win rate.
+// ============================================================================
+
+strategy("No Wick Retrace", shorttitle="NoWick", overlay=true,
+         max_lines_count=500, max_boxes_count=500, max_labels_count=500,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+         commission_type=strategy.commission.percent, commission_value=0.0,
+         slippage=1, initial_capital=10000, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=false)
+
+// ==================
+// ==== Inputs ======
+// ==================
+
+grpDetect = "Wickless Detection"
+grpTrend  = "Trend Filter"
+grpTrade  = "Trade Geometry"
+grpDisp   = "Display"
+
+// Exact equality is the real definition. The two tolerances exist because on
+// 5-decimal FX an exactly-zero wick is far rarer than on a tick-sized future
+// -- if almost nothing gets marked on a 15m forex chart, that is this, not a
+// bug. Raise wickTolFrac and re-measure, but be honest that loosening the
+// definition is loosening the strategy.
+wickTol     = input.float(0.0, "Wick Tolerance (absolute price)", minval=0, step=0.00001, group=grpDetect,
+     tooltip="A wick this size or smaller counts as no wick. 0 = exact equality, matching the indicator.")
+wickTolFrac = input.float(0.0, "Wick Tolerance (fraction of bar range)", minval=0, maxval=0.5, step=0.01, group=grpDetect,
+     tooltip="Scales with volatility, so it transfers across instruments the way an absolute price cannot. Try 0.05 on 5-decimal FX if nothing is being marked.")
+
+trendMode = input.string("structure", "Trend Definition", options=["structure", "ema", "both"], group=grpTrend,
+     tooltip="structure = higher highs AND higher lows (or lower lows AND lower highs), which is a LOCAL read: a normal pullback in a strong uptrend flips it bearish. ema = price above/below the EMA, closer to how the trend looks by eye. both = they must agree, which stops counter-trend entries at the cost of far fewer trades.")
+pivotLookback = input.int(5, "Pivot Lookback (structure mode)", minval=1, group=grpTrend,
+     tooltip="Bars either side of a swing. A pivot is only confirmed this many bars after it forms -- that lag is what keeps this honest.")
+emaLen = input.int(50, "EMA Length (ema mode)", minval=1, group=grpTrend)
+
+stopMode      = input.string("candle", "Stop Placement", options=["candle", "structure"], group=grpTrade,
+     tooltip="candle = just beyond the wickless candle's own edge. structure = at the last confirmed swing, if that is further away.")
+stopBufferATR = input.float(0.50, "Stop Buffer (x ATR)", minval=0.01, step=0.05, group=grpTrade,
+     tooltip="His 'some breathing room'. THIS IS THE ENTIRE RISK, because entry is at the candle's edge -- so it sets the whole trade's geometry, target included. Too tight and the entry bar covers both stop and target at once.")
+rr          = input.float(1.0, "Target (R multiple)", minval=0.1, step=0.1, group=grpTrade,
+     tooltip="1.0 = the 1:1 he describes. At 1:1 breakeven is 50% before costs.")
+atrLen      = input.int(14, "ATR Length", minval=1, group=grpTrade)
+zoneMaxAge  = input.int(100, "Level Max Age (bars)", minval=1, group=grpTrade,
+     tooltip="An unfilled level is abandoned after this many bars. On 15m, 100 bars is about a day.")
+
+showLevels = input.bool(true, "Show pending levels", group=grpDisp)
+showMarks  = input.bool(true, "Mark wickless candles", group=grpDisp)
+showBracket = input.bool(true, "TP / SL boxes", group=grpDisp)
+boxTransp  = input.int(82, "TP/SL box transparency", minval=0, maxval=100, group=grpDisp)
+tpColor    = input.color(#089981, "Take Profit", group=grpDisp)
+slColor    = input.color(#F23645, "Stop Loss", group=grpDisp)
+bullColor  = input.color(#089981, "Bullish", group=grpDisp)
+bearColor  = input.color(#F23645, "Bearish", group=grpDisp)
+
+// ==========================================
+// ==== Indicators -- global scope only =====
+// ==========================================
+// ta.* calls must execute on EVERY bar. Calling them inside a conditional
+// branch corrupts their internal state, which is a trap this project has
+// already hit once on the Lorentzian add-on.
+
+atrVal = ta.atr(atrLen)
+emaVal = ta.ema(close, emaLen)
+
+// ta.pivothigh/low return their value `pivotLookback` bars AFTER the pivot
+// formed, never before. That is the same confirmation lag engine.py's
+// confirmed_pivots() enforces by hand, so structure mode is causal for free
+// -- no repainting, and no way to consult a swing that has not finished.
+ph = ta.pivothigh(high, pivotLookback, pivotLookback)
+pl = ta.pivotlow(low, pivotLookback, pivotLookback)
+
+var float lastPH  = na
+var float prevPH  = na
+var float lastPL  = na
+var float prevPL  = na
+
+if not na(ph)
+    prevPH := lastPH
+    lastPH := ph
+if not na(pl)
+    prevPL := lastPL
+    lastPL := pl
+
+// ==================
+// ==== Trend =======
+// ==================
+
+hh = not na(lastPH) and not na(prevPH) and lastPH > prevPH
+hl = not na(lastPL) and not na(prevPL) and lastPL > prevPL
+ll = not na(lastPL) and not na(prevPL) and lastPL < prevPL
+lh = not na(lastPH) and not na(prevPH) and lastPH < prevPH
+
+structTrend = hh and hl ? 1 : ll and lh ? -1 : 0
+emaTrend    = na(emaVal) ? 0 : close > emaVal ? 1 : close < emaVal ? -1 : 0
+
+// "structure" is deliberately local: with a 5-bar pivot on a 15m chart it is
+// reading roughly the last hour, so an ordinary pullback inside a strong
+// uptrend prints a lower low and a lower high and it flips bearish -- which
+// is how this ends up shorting a market that is obviously rising to the eye.
+// That is a property of the definition, not a defect in the detection.
+//
+// "both" requires structure and the EMA to agree, so a pullback that has not
+// broken the bigger trend produces no trade at all rather than a
+// counter-trend one. Strictly fewer trades; that is the intended trade-off.
+// Wrapped inside parentheses on purpose: outside brackets, Pine requires a
+// continuation line to be indented by a number of spaces that is NOT a
+// multiple of four, or it reads as a new block and throws "end of line
+// without line continuation". Inside brackets, wrapping is unrestricted.
+trend = (trendMode == "ema" ? emaTrend :
+         trendMode == "both" ? (structTrend == emaTrend ? structTrend : 0) :
+         structTrend)
+
+// ==============================
+// ==== Wickless detection ======
+// ==============================
+// The looser of the two tolerances wins, so either knob alone does the job.
+
+tolLimit  = math.max(wickTol, wickTolFrac * (high - low))
+bullMark  = close > open and (open - low) <= tolLimit
+bearMark  = close < open and (high - open) <= tolLimit
+
+plotshape(showMarks and bullMark, title="Wickless bull", style=shape.triangleup,
+          location=location.belowbar, color=bullColor, size=size.tiny)
+plotshape(showMarks and bearMark, title="Wickless bear", style=shape.triangledown,
+          location=location.abovebar, color=bearColor, size=size.tiny)
+
+// ==========================================
+// ==== Pending levels waiting on a retrace ==
+// ==========================================
+// Parallel arrays, declared var at global scope (declaring var inside an if
+// is a Pine error this repo has already tripped over).
+
+var array<float> markLevel = array.new<float>()
+var array<int>   markBar   = array.new<int>()
+var array<int>   markDir   = array.new<int>()
+var array<line>  markLine  = array.new<line>()
+
+// ---- Step 1: mark a new with-trend wickless candle ------------------------
+
+if trend == 1 and bullMark
+    array.push(markLevel, low)
+    array.push(markBar, bar_index)
+    array.push(markDir, 1)
+    array.push(markLine, showLevels
+         ? line.new(bar_index, low, bar_index + 1, low, color=bullColor, width=1, extend=extend.none)
+         : line(na))
+else if trend == -1 and bearMark
+    array.push(markLevel, high)
+    array.push(markBar, bar_index)
+    array.push(markDir, -1)
+    array.push(markLine, showLevels
+         ? line.new(bar_index, high, bar_index + 1, high, color=bearColor, width=1, extend=extend.none)
+         : line(na))
+
+// ---- Expire: aged out, or price closed clean through the level ------------
+// A close through the level means the "unfilled wick" thesis for that candle
+// is dead, so the level is no longer a setup.
+
+exp = 0
+while exp < array.size(markLevel)
+    lvl = array.get(markLevel, exp)
+    dir = array.get(markDir, exp)
+    born = array.get(markBar, exp)
+    dead = (bar_index - born > zoneMaxAge) or (dir == 1 and close < lvl) or (dir == -1 and close > lvl)
+    if dead
+        ln = array.get(markLine, exp)
+        if not na(ln)
+            line.delete(ln)
+        array.remove(markLevel, exp)
+        array.remove(markBar, exp)
+        array.remove(markDir, exp)
+        array.remove(markLine, exp)
+    else
+        // Stretch the still-live level forward so it reads as a resting order.
+        ln = array.get(markLine, exp)
+        if not na(ln)
+            line.set_x2(ln, bar_index + 1)
+        exp += 1
+
+// ==========================================
+// ==== Pick the level the order rests at ===
+// ==========================================
+// A resting limit order sits at ONE price. When several levels are live, the
+// one price will reach first is the relevant one: for longs that is the
+// HIGHEST level at or below price, for shorts the LOWEST at or above. Levels
+// already on the wrong side of price are skipped -- price is past them, and a
+// limit order there would fill instantly at a better price than the setup
+// describes, which would be a fiction.
+
+float bestLong  = na
+float bestShort = na
+
+nLevels = array.size(markLevel)
+if nLevels > 0
+    for k = 0 to nLevels - 1
+        lvl = array.get(markLevel, k)
+        dir = array.get(markDir, k)
+        if dir == 1 and lvl <= close
+            bestLong := na(bestLong) ? lvl : math.max(bestLong, lvl)
+        if dir == -1 and lvl >= close
+            bestShort := na(bestShort) ? lvl : math.min(bestShort, lvl)
+
+// Stop and target are derived from the level the order rests at, using the
+// ATR current when the order is placed. Held in `var` so the exit can keep
+// quoting the same prices after the entry fills.
+var float restStop   = na
+var float restTarget = na
+var bool  restIsLong = false
+
+canTrade = not na(atrVal) and atrVal > 0
+
+// ==================
+// ==== Orders ======
+// ==================
+// strategy.entry(..., limit=) is the native form of the resting limit order:
+// the fill happens AT the marked level, not at some later bar's close, and
+// TradingView -- not this script -- decides whether price actually got there.
+// That is the whole reason to run this here rather than guess at fills.
+//
+// ONE exit, no scale-out. This matches partial_at_tp1=False in brackets.py
+// and for the same reason: a half-off at 0.5R scores a win as 0.75R against a
+// full 1R loss, which quietly moves breakeven from 50% to 57%.
+
+if strategy.position_size == 0 and canTrade
+    if trend == 1 and not na(bestLong)
+        base = stopMode == "structure" and not na(lastPL) ? math.min(lastPL, bestLong) : bestLong
+        st   = base - stopBufferATR * atrVal
+        risk = bestLong - st
+        if risk > 0
+            restStop   := st
+            restTarget := bestLong + rr * risk
+            restIsLong := true
+            strategy.cancel("NW Short")
+            strategy.entry("NW Long", strategy.long, limit=bestLong)
+    else if trend == -1 and not na(bestShort)
+        base = stopMode == "structure" and not na(lastPH) ? math.max(lastPH, bestShort) : bestShort
+        st   = base + stopBufferATR * atrVal
+        risk = st - bestShort
+        if risk > 0
+            restStop   := st
+            restTarget := bestShort - rr * risk
+            restIsLong := false
+            strategy.cancel("NW Long")
+            strategy.entry("NW Short", strategy.short, limit=bestShort)
+    else
+        // No live level in the trend direction: pull the resting orders.
+        strategy.cancel("NW Long")
+        strategy.cancel("NW Short")
+
+// Exits are re-stated every bar so they stay attached to whichever entry
+// filled. The prices themselves were fixed when the order was placed.
+if strategy.position_size > 0
+    strategy.exit("NW Long X", from_entry="NW Long", stop=restStop, limit=restTarget)
+if strategy.position_size < 0
+    strategy.exit("NW Short X", from_entry="NW Short", stop=restStop, limit=restTarget)
+
+// ==================
+// ==== Drawing =====
+// ==================
+// Draw the bracket on the bar the position actually opens, not on the bar the
+// order was placed -- those can be far apart, which is the point of a resting
+// order.
+
+justOpened = strategy.position_size != 0 and strategy.position_size[1] == 0
+
+// Drawn inline, not in a helper: Pine functions cannot assign to global
+// variables, so a helper setting tpBox/slBox would not compile.
+var box   tpBox   = na
+var box   slBox   = na
+var line  entryLn = na
+var label tpLbl   = na
+var label slLbl   = na
+
+if justOpened and showBracket
+    ep = strategy.position_avg_price
+    tpBox := box.new(bar_index, restTarget, bar_index + 1, ep,
+         bgcolor=color.new(tpColor, boxTransp), border_color=color.new(tpColor, 45),
+         border_width=1)
+    slBox := box.new(bar_index, ep, bar_index + 1, restStop,
+         bgcolor=color.new(slColor, boxTransp), border_color=color.new(slColor, 45),
+         border_width=1)
+    entryLn := line.new(bar_index, ep, bar_index + 1, ep,
+         color=color.new(color.white, 20), width=2)
+    rrShown = math.abs(restTarget - ep) / math.abs(ep - restStop)
+    tpLbl := label.new(bar_index + 1, restTarget,
+         "TP " + str.tostring(restTarget, format.mintick) + "   " +
+         str.tostring(rrShown, "#.##") + "R",
+         style=label.style_label_left, textcolor=tpColor,
+         color=color.rgb(0, 0, 0, 100), size=size.small)
+    slLbl := label.new(bar_index + 1, restStop,
+         "SL " + str.tostring(restStop, format.mintick),
+         style=label.style_label_left, textcolor=slColor,
+         color=color.rgb(0, 0, 0, 100), size=size.small)
+
+// Grow the boxes while the position is live, then stop -- a box that keeps
+// extending after the exit misrepresents how long the trade was actually held.
+if strategy.position_size != 0 and not na(tpBox)
+    box.set_right(tpBox, bar_index + 1)
+    box.set_right(slBox, bar_index + 1)
+    line.set_x2(entryLn, bar_index + 1)
+    label.set_x(tpLbl, bar_index + 1)
+    label.set_x(slLbl, bar_index + 1)
+
+plot(trendMode == "ema" ? emaVal : na, title="EMA", color=color.new(color.orange, 40))
+
+bgcolor(trend == 1 ? color.new(bullColor, 94) : trend == -1 ? color.new(bearColor, 94) : na,
+        title="Trend shading")
+
+// ==================
+// ==== Alerts ======
+// ==================
+// alertcondition() is silently inert inside a strategy() -- TradingView warns
+// about it at compile time and then ignores it. alert() is the form that
+// works here. To use these: create the alert with condition
+// "Any alert() function call".
+//
+// Order fills do not need anything here. TradingView raises those from the
+// strategy's own entries and exits.
+
+if bullMark
+    alert("No Wick: bullish wickless candle marked on " + syminfo.ticker +
+          " " + timeframe.period, alert.freq_once_per_bar_close)
+if bearMark
+    alert("No Wick: bearish wickless candle marked on " + syminfo.ticker +
+          " " + timeframe.period, alert.freq_once_per_bar_close)

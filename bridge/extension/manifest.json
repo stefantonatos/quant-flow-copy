@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "QuantFlow TradingView Bridge v1.4",
+  "version": "1.4.0",
+  "description": "Send a TradingView trade to MT5 as a pending limit order, sized from a fixed money risk. Works without a paid TradingView plan.",
+  "permissions": [
+    "storage",
+    "notifications",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://*.tradingview.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.tradingview.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_title": "QuantFlow Bridge",
+    "default_popup": "popup.html"
+  }
+}
