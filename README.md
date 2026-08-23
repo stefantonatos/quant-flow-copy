@@ -121,3 +121,17 @@ DISCLAIMER
 ────────────────────────────────────────────────────────────────────
 Educational / research only. Backtests on random or historical data are
 not predictive of future returns. Not financial advice.
+
+---
+
+## Also in this repo: `health_bot.py`
+
+A separate, self-contained project that shares nothing with the backtester
+except the repo: a Telegram bot that logs what you eat and train into SQLite,
+interprets the messages with Claude, and texts you a check-in built from your
+own numbers. Setup and design notes: [`health/README.md`](health/README.md).
+
+```bash
+python health_bot.py log "ate chicken and rice, 30 min legs"
+python health_bot.py report --days 7
+```

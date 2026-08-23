@@ -17,3 +17,8 @@ sample_data.csv
 Thumbs.db
 .idea/
 .vscode/
+
+# Health chat (health_bot.py) — personal data and downloaded voice notes
+health.db
+health.db-journal
+health_media/

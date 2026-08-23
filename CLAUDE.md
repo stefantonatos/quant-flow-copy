@@ -5,7 +5,7 @@ ends.** Add what was learned, what changed, what broke. Correct anything here th
 out to be wrong — and say plainly that it was wrong, don't quietly delete it. The user
 should never have to re-explain this project from scratch.
 
-Last updated: 2026-08-11 (second session, same day — merged into master).
+Last updated: 2026-08-23 (Telegram health chat session; see the section on it below).
 
 ---
 
@@ -46,6 +46,8 @@ network without checking which environment you're actually in.
   class as the pre-existing `atr()` fix from commit 843e444) inside a new `wavetrend()`
   indicator it added for the KNN port's WaveTrend feature.
 - `test_engine.py` grew from 8 to 11 tests (regression tests for the above); all pass
+  **Correction (2026-08-23): it is 13 now, not 11** — the MT5-port sessions added two
+  more. Don't trust a test count in this file without running the suite.
   alongside `selftest.py`'s 19 (unrelated, no overlap in what they cover).
 
 **Still true and unchanged by this merge:** everything below about the Pine deliverable,
@@ -86,6 +88,74 @@ worse than the algorithm's inherent O(n·maxBarsBack) cost.
 itself. Ask Stefan to paste it into MetaEditor, compile, and report the exact error text
 — same paste → error → fix loop already used for the Pine file. Don't assume it compiles
 clean on the first try; two rounds were needed for the Pine file too.
+
+## Update: Telegram health chat added (2026-08-23)
+
+**This has nothing to do with trading.** Stefan asked for the thing from that video
+about not paying Ashton Hall $8,000 for motivational texts: a Telegram bot you talk to
+("ate some tandoori chicken dude, had a very short legs workout"), which confirms
+receipt, files the message into the right table, and can text you back a check-in. It
+lives in the same repo but shares no code with the backtester. If you are here about
+Pine, MQL5 or `engine.py`, skip this section entirely.
+
+```
+health_bot.py            CLI entry point — init / ingest / process / report / coach / log
+health/schema.sql        16 tables + 2 views, all CREATE ... IF NOT EXISTS
+health/db.py             every SQL statement in the project
+health/telegram.py       Bot API client, stdlib urllib, long polling (not webhooks)
+health/ingest.py         Telegram in -> `messages` table + a confirmation reply
+health/extract.py        pending messages -> meals / workouts / sleep / ... rows
+health/report.py         rows -> sentences
+health/coach.py          the part that texts you
+health/transcribe.py     voice notes, via whatever speech-to-text you have
+health/README.md         setup, env vars, design notes — read this first
+test_health.py           41 tests, no network and no API key needed
+```
+
+**The design decision that matters:** ingest and extract are separate processes writing
+to separate tables. `messages` is append-only and raw; interpretation happens later and
+writes rows that all carry the `message_id` they came from, with the raw model output
+kept in `extraction_runs`. A bad model response can produce a wrong meal row; it can
+never cost you the original sentence, and extraction can always be re-run over the
+inbox. Do not "simplify" this into one step.
+
+**Dependencies:** the repo's stdlib-only value holds everywhere except the two Claude
+calls, which use the official `anthropic` SDK (structured outputs via
+`output_config.format`, model `claude-opus-5`, server-side refusal fallback). Without
+the package or an API key it degrades to a deliberately crude keyword extractor that
+estimates no macros at all and says so in every message. That fallback exists so the
+pipeline is testable offline — it is not a feature, and it should not be improved into
+one.
+
+**Voice notes cannot be transcribed by this project and that is not a bug to fix.** The
+Claude API takes text and images, not audio, and the Bot API has no transcription method
+for ordinary bots. `HEALTH_TRANSCRIBE_CMD` shells out to whisper.cpp or similar. Unset,
+voice messages are stored with status `needs_transcription` and the bot says it could not
+read them. Do not replace that with a guess.
+
+**Two honesty rules carried over from the trading side — preserve both:**
+1. A meal logged with no calorie estimate is **not** a zero-calorie meal. It is counted
+   in `meals_missing_macros` and every total containing one is labelled a floor, not a
+   sum. The coach's protein/calorie flags are suppressed entirely while any unpriced meal
+   is in the window, because a "shortfall" that is really a hole in the data is exactly
+   the uninformative-statistic problem this repo already exists to expose.
+2. Week averages are computed over logged days only and always printed next to how many
+   days were logged, with the sentence saying they describe your logging, not your
+   eating.
+Both have tests (`TestHonestReporting`). If one starts failing, the fix is the code, not
+the test.
+
+**Security:** `TELEGRAM_ALLOWED_CHATS` is a whitelist of chat ids. A Telegram bot is
+public the moment it exists, so with the whitelist empty anyone who finds the username
+can write rows into Stefan's health log. Unknown chats are dropped **silently** — replying
+would confirm to a stranger that the bot is live. `health.db` and `health_media/` are
+gitignored; that database is personal data and must never be committed.
+
+**Status: written and tested locally, never run against real Telegram.** There is no bot
+token in this environment, so every Telegram interaction in the tests goes through a fake
+transport. Expect the first real run to surface something — start with
+`python health_bot.py whoami`, which prints the chat ids currently messaging the bot
+without consuming the update offset.
 
 ## THREE different scripts exist. Do not confuse them.
 
